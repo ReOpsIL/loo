@@ -1,3 +1,4 @@
+use crate::autocomplete::{AutocompleteEngine, FileEntry};
 use crossterm::{
     cursor,
     event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
@@ -13,6 +14,24 @@ pub struct TerminalInput {
     esc_count: u8,
     terminal_size: (u16, u16), // (width, height)
     prompt: String,
+    autocomplete_engine: AutocompleteEngine,
+}
+
+#[derive(Debug)]
+enum AutocompleteState {
+    None,
+    FileSystem {
+        suggestions: Vec<FileEntry>,
+        selected_index: usize,
+        prefix: String,
+        start_pos: usize, // Position in text where @ starts
+    },
+    Command {
+        suggestions: Vec<String>,
+        selected_index: usize,
+        prefix: String,
+        start_pos: usize, // Position in text where / starts
+    },
 }
 
 pub enum InputEvent {
@@ -26,6 +45,7 @@ struct TextBuffer {
     content: String,
     cursor_pos: usize, // Character position in content (NOT byte position)
     display_offset: usize, // For horizontal scrolling
+    autocomplete_state: AutocompleteState,
 }
 
 impl TextBuffer {
@@ -34,6 +54,7 @@ impl TextBuffer {
             content: String::new(),
             cursor_pos: 0,
             display_offset: 0,
+            autocomplete_state: AutocompleteState::None,
         }
     }
 
@@ -140,17 +161,101 @@ impl TextBuffer {
         self.content.clear();
         self.cursor_pos = 0;
         self.display_offset = 0;
+        self.autocomplete_state = AutocompleteState::None;
+    }
+
+    // Check if current position triggers autocomplete
+    fn should_show_autocomplete(&self) -> bool {
+        if self.cursor_pos == 0 {
+            return false;
+        }
+
+        let chars: Vec<char> = self.content.chars().collect();
+        let mut pos = self.cursor_pos;
+
+        // Look backwards for @ or / at word boundary
+        while pos > 0 {
+            pos -= 1;
+            let ch = chars[pos];
+            
+            if ch == '@' || ch == '/' {
+                // Check if it's at start or preceded by whitespace
+                if pos == 0 || chars[pos - 1].is_whitespace() {
+                    return true;
+                }
+            }
+            
+            if ch.is_whitespace() {
+                break;
+            }
+        }
+        
+        false
+    }
+
+    // Extract the autocomplete prefix (text after @ or /)
+    fn get_autocomplete_prefix(&self) -> Option<(char, usize, String)> {
+        if self.cursor_pos == 0 {
+            return None;
+        }
+
+        let chars: Vec<char> = self.content.chars().collect();
+        let mut start_pos = self.cursor_pos;
+
+        // Look backwards for @ or /
+        while start_pos > 0 {
+            start_pos -= 1;
+            let ch = chars[start_pos];
+            
+            if ch == '@' || ch == '/' {
+                // Check if it's at start or preceded by whitespace
+                if start_pos == 0 || chars[start_pos - 1].is_whitespace() {
+                    let prefix: String = chars[start_pos + 1..self.cursor_pos].iter().collect();
+                    return Some((ch, start_pos, prefix));
+                }
+            }
+            
+            if ch.is_whitespace() {
+                break;
+            }
+        }
+        
+        None
+    }
+
+    // Complete autocomplete selection - replace @ or / prefix with selected item
+    fn complete_autocomplete(&mut self, completion_text: &str, is_directory: bool) -> bool {
+        if let Some((_trigger_char, start_pos, _prefix)) = self.get_autocomplete_prefix() {
+            // Remove the text from trigger character to cursor
+            let start_byte = self.char_to_byte_pos(start_pos + 1); // Skip the @ or /
+            let cursor_byte = self.char_to_byte_pos(self.cursor_pos);
+            
+            // Replace the text between trigger and cursor with completion
+            self.content.replace_range(start_byte..cursor_byte, completion_text);
+            
+            // Update cursor position to be at the end of the completion
+            self.cursor_pos = start_pos + 1 + completion_text.chars().count();
+            
+            // If it's not a directory, clear autocomplete state
+            if !is_directory {
+                self.autocomplete_state = AutocompleteState::None;
+            }
+            
+            return is_directory;
+        }
+        false
     }
 }
 
 impl TerminalInput {
-    pub fn new() -> Self {
+    pub fn new(working_dir: String) -> Self {
         let size = terminal::size().unwrap_or((80, 24));
         Self {
             exit_count: 0,
             esc_count: 0,
             terminal_size: size,
             prompt: "💬 You: ".to_string(),
+            autocomplete_engine: AutocompleteEngine::new(working_dir),
         }
     }
 
@@ -181,6 +286,50 @@ impl TerminalInput {
                             code: KeyCode::Enter,
                             ..
                         } => {
+                            // Check if autocomplete is active and complete the selection
+                            let completion_info = match &buffer.autocomplete_state {
+                                AutocompleteState::FileSystem { suggestions, selected_index, .. } => {
+                                    if !suggestions.is_empty() && *selected_index < suggestions.len() {
+                                        let selected_file = &suggestions[*selected_index];
+                                        // Fix double slash issue by not adding / if it already ends with /
+                                        let completion_text = if selected_file.is_directory {
+                                            if selected_file.full_path.ends_with('/') {
+                                                selected_file.full_path.clone()
+                                            } else {
+                                                format!("{}/", selected_file.full_path)
+                                            }
+                                        } else {
+                                            selected_file.full_path.clone()
+                                        };
+                                        Some((completion_text, selected_file.is_directory))
+                                    } else {
+                                        None
+                                    }
+                                }
+                                AutocompleteState::Command { suggestions, selected_index, .. } => {
+                                    if !suggestions.is_empty() && *selected_index < suggestions.len() {
+                                        Some((suggestions[*selected_index].clone(), false))
+                                    } else {
+                                        None
+                                    }
+                                }
+                                AutocompleteState::None => None,
+                            };
+
+                            if let Some((text, is_directory)) = completion_info {
+                                let continue_browsing = buffer.complete_autocomplete(&text, is_directory);
+                                
+                                if continue_browsing {
+                                    // Update autocomplete to show folder contents
+                                    self.update_autocomplete(&mut buffer)?;
+                                    self.render_with_autocomplete(&mut stdout, &buffer)?;
+                                } else {
+                                    self.render_input(&mut stdout, &buffer)?;
+                                }
+                                continue;
+                            }
+
+                            // Normal Enter handling - submit the input
                             execute!(stdout, Print("\n"))?;
                             disable_raw_mode()?;
                             
@@ -274,6 +423,54 @@ impl TerminalInput {
                             self.render_input(&mut stdout, &buffer)?;
                         }
 
+                        // Up arrow - navigate autocomplete
+                        KeyEvent {
+                            code: KeyCode::Up,
+                            ..
+                        } => {
+                            match &mut buffer.autocomplete_state {
+                                AutocompleteState::FileSystem { selected_index, suggestions, .. } => {
+                                    if !suggestions.is_empty() && *selected_index > 0 {
+                                        *selected_index -= 1;
+                                        self.render_with_autocomplete(&mut stdout, &buffer)?;
+                                    }
+                                }
+                                AutocompleteState::Command { selected_index, suggestions, .. } => {
+                                    if !suggestions.is_empty() && *selected_index > 0 {
+                                        *selected_index -= 1;
+                                        self.render_with_autocomplete(&mut stdout, &buffer)?;
+                                    }
+                                }
+                                AutocompleteState::None => {
+                                    // No autocomplete active, ignore
+                                }
+                            }
+                        }
+
+                        // Down arrow - navigate autocomplete
+                        KeyEvent {
+                            code: KeyCode::Down,
+                            ..
+                        } => {
+                            match &mut buffer.autocomplete_state {
+                                AutocompleteState::FileSystem { selected_index, suggestions, .. } => {
+                                    if !suggestions.is_empty() && *selected_index < suggestions.len() - 1 {
+                                        *selected_index += 1;
+                                        self.render_with_autocomplete(&mut stdout, &buffer)?;
+                                    }
+                                }
+                                AutocompleteState::Command { selected_index, suggestions, .. } => {
+                                    if !suggestions.is_empty() && *selected_index < suggestions.len() - 1 {
+                                        *selected_index += 1;
+                                        self.render_with_autocomplete(&mut stdout, &buffer)?;
+                                    }
+                                }
+                                AutocompleteState::None => {
+                                    // No autocomplete active, ignore
+                                }
+                            }
+                        }
+
                         KeyEvent {
                             code: KeyCode::Left,
                             ..
@@ -313,7 +510,25 @@ impl TerminalInput {
                         } => {
                             if buffer.delete_char_before() {
                                 self.esc_count = 0;
-                                self.render_input(&mut stdout, &buffer)?;
+                                
+                                // Store previous autocomplete state to detect changes
+                                let had_autocomplete = !matches!(buffer.autocomplete_state, AutocompleteState::None);
+                                
+                                // Update autocomplete after deletion
+                                self.update_autocomplete(&mut buffer)?;
+                                
+                                let has_autocomplete = !matches!(buffer.autocomplete_state, AutocompleteState::None);
+                                
+                                // If autocomplete disappeared, clear the screen first
+                                if had_autocomplete && !has_autocomplete {
+                                    execute!(stdout, Clear(ClearType::FromCursorDown))?;
+                                }
+                                
+                                if has_autocomplete {
+                                    self.render_with_autocomplete(&mut stdout, &buffer)?;
+                                } else {
+                                    self.render_input(&mut stdout, &buffer)?;
+                                }
                             }
                         }
 
@@ -363,9 +578,33 @@ impl TerminalInput {
                             modifiers: KeyModifiers::NONE | KeyModifiers::SHIFT,
                             ..
                         } => {
-                            buffer.insert_char(c);
-                            self.esc_count = 0;
-                            self.render_input(&mut stdout, &buffer)?;
+                            // Special handling for space - always hides autocomplete
+                            if c == ' ' && matches!(buffer.autocomplete_state, AutocompleteState::FileSystem { .. } | AutocompleteState::Command { .. }) {
+                                // Space - cancel autocomplete and insert space
+                                buffer.autocomplete_state = AutocompleteState::None;
+                                buffer.insert_char(c);
+                                // Clear the screen from cursor down to remove autocomplete display
+                                execute!(stdout, Clear(ClearType::FromCursorDown))?;
+                                self.render_input(&mut stdout, &buffer)?;
+                            } 
+                            // Ignore @ when already in file system autocomplete mode
+                            else if c == '@' && matches!(buffer.autocomplete_state, AutocompleteState::FileSystem { .. }) {
+                                // Ignore the @ key when already browsing files
+                                continue;
+                            }
+                            else {
+                                buffer.insert_char(c);
+                                self.esc_count = 0;
+                                
+                                // Check for autocomplete triggers
+                                self.update_autocomplete(&mut buffer)?;
+                                
+                                if matches!(buffer.autocomplete_state, AutocompleteState::None) {
+                                    self.render_input(&mut stdout, &buffer)?;
+                                } else {
+                                    self.render_with_autocomplete(&mut stdout, &buffer)?;
+                                }
+                            }
                         }
 
                         // Tab - insert 4 spaces
@@ -484,6 +723,164 @@ impl TerminalInput {
     pub fn reset_counters(&mut self) {
         self.exit_count = 0;
         self.esc_count = 0;
+    }
+
+    fn update_autocomplete(&mut self, buffer: &mut TextBuffer) -> Result<(), Box<dyn std::error::Error>> {
+        if buffer.should_show_autocomplete() {
+            if let Some((trigger_char, start_pos, prefix)) = buffer.get_autocomplete_prefix() {
+                match trigger_char {
+                    '@' => {
+                        // File system autocomplete
+                        let suggestions = self.autocomplete_engine.get_file_suggestions(&prefix);
+                        buffer.autocomplete_state = AutocompleteState::FileSystem {
+                            suggestions,
+                            selected_index: 0,
+                            prefix: prefix.clone(),
+                            start_pos,
+                        };
+                    }
+                    '/' => {
+                        // Command autocomplete
+                        let mut commands = vec![
+                            "model".to_string(),
+                            "list-models".to_string(),
+                        ];
+                        
+                        // Filter commands based on prefix
+                        commands.retain(|cmd| cmd.starts_with(&prefix));
+                        
+                        buffer.autocomplete_state = AutocompleteState::Command {
+                            suggestions: commands,
+                            selected_index: 0,
+                            prefix: prefix.clone(),
+                            start_pos,
+                        };
+                    }
+                    _ => {
+                        buffer.autocomplete_state = AutocompleteState::None;
+                    }
+                }
+            } else {
+                buffer.autocomplete_state = AutocompleteState::None;
+            }
+        } else {
+            buffer.autocomplete_state = AutocompleteState::None;
+        }
+        Ok(())
+    }
+
+    fn render_with_autocomplete(&self, stdout: &mut Stdout, buffer: &TextBuffer) -> Result<(), Box<dyn std::error::Error>> {
+        // Clear screen from current line down and render the input
+        execute!(
+            stdout,
+            Clear(ClearType::FromCursorDown),
+        )?;
+        self.render_input(stdout, buffer)?;
+
+        // Then render autocomplete suggestions below
+        match &buffer.autocomplete_state {
+            AutocompleteState::FileSystem { suggestions, selected_index, .. } => {
+                if !suggestions.is_empty() {
+                    let max_items = std::cmp::min(suggestions.len(), 10); // Show max 10 items
+                    for (i, file_entry) in suggestions.iter().take(max_items).enumerate() {
+                        let marker = if i == *selected_index { "> " } else { "  " };
+                        let suffix = if file_entry.is_directory { "/" } else { "" };
+                        
+                        execute!(
+                            stdout,
+                            Print("\n"),
+                            cursor::MoveToColumn(0),
+                            SetForegroundColor(if i == *selected_index { Color::White } else { Color::DarkGrey }),
+                            Print(format!("{}{}{}", marker, file_entry.name, suffix)),
+                            ResetColor
+                        )?;
+                    }
+                    
+                    if suggestions.len() > max_items {
+                        execute!(
+                            stdout,
+                            Print("\n"),
+                            cursor::MoveToColumn(0),
+                            SetForegroundColor(Color::DarkGrey),
+                            Print(format!("  ... and {} more", suggestions.len() - max_items)),
+                            ResetColor
+                        )?;
+                    }
+                }
+            }
+            
+            AutocompleteState::Command { suggestions, selected_index, .. } => {
+                if !suggestions.is_empty() {
+                    let command_descriptions = std::collections::HashMap::from([
+                        ("model".to_string(), "Change the current LLM model".to_string()),
+                        ("list-models".to_string(), "List all available LLM models".to_string()),
+                    ]);
+                    
+                    let max_items = std::cmp::min(suggestions.len(), 8); // Show max 8 commands
+                    for (i, command) in suggestions.iter().take(max_items).enumerate() {
+                        let marker = if i == *selected_index { "> " } else { "  " };
+                        let empty_desc = String::new();
+                        let description = command_descriptions.get(command).unwrap_or(&empty_desc);
+                        
+                        execute!(
+                            stdout,
+                            Print("\n"),
+                            cursor::MoveToColumn(0),
+                            SetForegroundColor(if i == *selected_index { Color::White } else { Color::DarkGrey }),
+                            Print(format!("{}/{}", marker, command)),
+                            ResetColor
+                        )?;
+                        
+                        if !description.is_empty() {
+                            // Calculate padding to align descriptions
+                            let command_width = command.len() + 3; // "/" + command + some padding
+                            let padding = if command_width < 20 { 20 - command_width } else { 4 };
+                            let spaces = " ".repeat(padding);
+                            
+                            execute!(
+                                stdout,
+                                SetForegroundColor(Color::DarkGrey),
+                                Print(format!("{}{}", spaces, description)),
+                                ResetColor
+                            )?;
+                        }
+                    }
+                }
+            }
+            
+            AutocompleteState::None => {
+                // No autocomplete, just render normal input - already done above
+            }
+        }
+
+        // Move cursor back to the correct position in the input line
+        let prompt_width = self.prompt.width();
+        let text_chars: Vec<char> = buffer.content.chars().collect();
+        let cursor_text: String = text_chars[..buffer.cursor_pos].iter().collect();
+        let cursor_display_width = cursor_text.width();
+        
+        execute!(
+            stdout,
+            cursor::MoveUp(match &buffer.autocomplete_state {
+                AutocompleteState::FileSystem { suggestions, .. } => {
+                    let lines = if suggestions.is_empty() { 0 } else {
+                        std::cmp::min(suggestions.len(), 10) + if suggestions.len() > 10 { 1 } else { 0 }
+                    };
+                    lines as u16
+                }
+                AutocompleteState::Command { suggestions, .. } => {
+                    let lines = if suggestions.is_empty() { 0 } else {
+                        std::cmp::min(suggestions.len(), 8)
+                    };
+                    lines as u16
+                }
+                AutocompleteState::None => 0,
+            }),
+            cursor::MoveToColumn((prompt_width + cursor_display_width) as u16)
+        )?;
+
+        stdout.flush()?;
+        Ok(())
     }
 }
 

@@ -94,7 +94,7 @@ impl LooEngine {
         println!("   • Press ESC three times to clear your input");
         println!("   • Type your messages and press Enter to send\n");
 
-        let mut terminal_input = TerminalInput::new();
+        let mut terminal_input = TerminalInput::new(self.working_dir.clone());
 
         // Interactive chat loop
         loop {

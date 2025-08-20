@@ -1,3 +1,4 @@
+pub mod autocomplete;
 pub mod cli;
 pub mod config;
 pub mod engine;
