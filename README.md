@@ -1,3 +1,5 @@
+![LOO CLI](loo_s.jpg)
+
 # LOO CLI
 
 An LLM-based coding CLI that acts as a bridge between AI reasoning and filesystem/command-line tools.
