@@ -1,0 +1,297 @@
+{
+  "test_scenarios": {
+    "hello_world_python": {
+      "description": "Create a simple Python Hello World program",
+      "user_prompt": "create a simple hello world program in Python",
+      "expected_files": ["hello.py"],
+      "expected_content": {
+        "hello.py": "print('Hello, World!')"
+      },
+      "mock_responses": [
+        {
+          "message": "I'll create a simple Python Hello World program for you.",
+          "tool_calls": [
+            {
+              "id": "call_1",
+              "function": {
+                "name": "create_file",
+                "arguments": {
+                  "path": "hello.py",
+                  "content": "print('Hello, World!')\n"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "message": "Perfect! I've created the Hello World program.",
+          "tool_calls": [
+            {
+              "id": "call_2", 
+              "function": {
+                "name": "complete",
+                "arguments": {}
+              }
+            }
+          ]
+        }
+      ]
+    },
+    
+    "rust_cargo_project": {
+      "description": "Create a complete Rust project with Cargo.toml and src/main.rs",
+      "user_prompt": "create a new Rust project with cargo",
+      "expected_files": ["Cargo.toml", "src/main.rs"],
+      "expected_content": {
+        "Cargo.toml": "name = \"test-project\"",
+        "src/main.rs": "fn main()"
+      },
+      "mock_responses": [
+        {
+          "message": "I'll create a new Rust project for you.",
+          "tool_calls": [
+            {
+              "id": "call_1",
+              "function": {
+                "name": "create_file", 
+                "arguments": {
+                  "path": "Cargo.toml",
+                  "content": "[package]\nname = \"test-project\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "message": "Now I'll create the source directory and main file.",
+          "tool_calls": [
+            {
+              "id": "call_2",
+              "function": {
+                "name": "create_directory",
+                "arguments": {
+                  "path": "src"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "message": "Creating the main.rs file.",
+          "tool_calls": [
+            {
+              "id": "call_3",
+              "function": {
+                "name": "create_file",
+                "arguments": {
+                  "path": "src/main.rs",
+                  "content": "fn main() {\n    println!(\"Hello, world!\");\n}\n"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "message": "Let me verify the project builds correctly.",
+          "tool_calls": [
+            {
+              "id": "call_4",
+              "function": {
+                "name": "run_command",
+                "arguments": {
+                  "command": "cargo check"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "message": "Excellent! The Rust project has been created successfully.",
+          "tool_calls": [
+            {
+              "id": "call_5",
+              "function": {
+                "name": "complete",
+                "arguments": {}
+              }
+            }
+          ]
+        }
+      ]
+    },
+    
+    "web_api_project": {
+      "description": "Create a simple web API with multiple files",
+      "user_prompt": "create a simple REST API server",
+      "expected_files": ["app.py", "requirements.txt", "README.md"],
+      "expected_content": {
+        "app.py": "from flask import Flask",
+        "requirements.txt": "Flask",
+        "README.md": "# REST API"
+      },
+      "mock_responses": [
+        {
+          "message": "I'll create a simple REST API server using Flask.",
+          "tool_calls": [
+            {
+              "id": "call_1",
+              "function": {
+                "name": "create_file",
+                "arguments": {
+                  "path": "app.py", 
+                  "content": "from flask import Flask, jsonify\n\napp = Flask(__name__)\n\n@app.route('/api/hello')\ndef hello():\n    return jsonify({'message': 'Hello, World!'})\n\nif __name__ == '__main__':\n    app.run(debug=True)\n"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "message": "Now I'll create the requirements file.",
+          "tool_calls": [
+            {
+              "id": "call_2",
+              "function": {
+                "name": "create_file",
+                "arguments": {
+                  "path": "requirements.txt",
+                  "content": "Flask==2.3.3\n"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "message": "Let me also add a README with setup instructions.",
+          "tool_calls": [
+            {
+              "id": "call_3",
+              "function": {
+                "name": "create_file",
+                "arguments": {
+                  "path": "README.md",
+                  "content": "# REST API Server\n\nA simple Flask-based REST API.\n\n## Setup\n\n```bash\npip install -r requirements.txt\npython app.py\n```\n\n## Endpoints\n\n- `GET /api/hello` - Returns a hello message\n"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "message": "Perfect! Your REST API server is ready to use.",
+          "tool_calls": [
+            {
+              "id": "call_4",
+              "function": {
+                "name": "complete",
+                "arguments": {}
+              }
+            }
+          ]
+        }
+      ]
+    },
+    
+    "error_recovery": {
+      "description": "Test error handling and recovery",
+      "user_prompt": "test error handling with file operations", 
+      "expected_files": ["recovered_file.txt"],
+      "expected_content": {
+        "recovered_file.txt": "Recovery successful"
+      },
+      "mock_responses": [
+        {
+          "message": "I'll test error handling by trying to read a non-existent file.",
+          "tool_calls": [
+            {
+              "id": "call_1",
+              "function": {
+                "name": "read_file",
+                "arguments": {
+                  "path": "nonexistent.txt"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "message": "As expected, the file doesn't exist. Let me create it and demonstrate recovery.",
+          "tool_calls": [
+            {
+              "id": "call_2",
+              "function": {
+                "name": "create_file",
+                "arguments": {
+                  "path": "recovered_file.txt",
+                  "content": "Recovery successful - this file was created after an error.\n"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "message": "Now let me read the file to confirm recovery.",
+          "tool_calls": [
+            {
+              "id": "call_3",
+              "function": {
+                "name": "read_file",
+                "arguments": {
+                  "path": "recovered_file.txt"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "message": "Error handling and recovery test completed successfully!",
+          "tool_calls": [
+            {
+              "id": "call_4",
+              "function": {
+                "name": "complete",
+                "arguments": {}
+              }
+            }
+          ]
+        }
+      ]
+    }
+  },
+  
+  "configuration_tests": {
+    "default_config": {
+      "openrouter": {
+        "model": "meta-llama/llama-3.1-8b-instruct:free",
+        "base_url": "https://openrouter.ai/api/v1"
+      },
+      "preferences": {
+        "verbose": false,
+        "auto_confirm": false
+      },
+      "tools": {
+        "filesystem": true,
+        "commands": true,
+        "git": true,
+        "command_timeout": 300
+      }
+    },
+    
+    "custom_config": {
+      "openrouter": {
+        "api_key": "test-api-key",
+        "model": "anthropic/claude-3.5-sonnet",
+        "base_url": "https://api.custom.com"
+      },
+      "preferences": {
+        "verbose": true,
+        "auto_confirm": true,
+        "default_directory": "/home/user/projects"
+      },
+      "tools": {
+        "filesystem": true,
+        "commands": false,
+        "git": true,
+        "command_timeout": 600
+      }
+    }
+  }
+}

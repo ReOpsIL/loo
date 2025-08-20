@@ -1,0 +1,30 @@
+[package]
+name = "loo-cli"
+version = "0.1.0"
+edition = "2021"
+default-run = "loo"
+
+[lib]
+name = "loo_cli"
+
+[[bin]]
+name = "loo"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.0", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+dirs = "5.0"
+reqwest = { version = "0.11", features = ["json"] }
+tokio = { version = "1.0", features = ["full", "signal"] }
+uuid = { version = "1.0", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+tempfile = "3.8"
+warp = "0.3"
+tokio-stream = { version = "0.1", features = ["net"] }
+env_logger = "0.10"
+mockito = "1.2"
