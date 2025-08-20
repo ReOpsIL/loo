@@ -21,7 +21,7 @@ pub enum StoryEntryType {
     UserPrompt,
     AssistantResponse,
     ToolExecution { tool_name: String, args: Value },
-    ToolResult { tool_name: String, success: bool, summary: String },
+    ToolResult { success: bool, summary: String },
     ProcessInterrupted,
 }
 
@@ -70,7 +70,6 @@ impl StoryLogger {
         self.entries.push(StoryEntry {
             timestamp: Utc::now(),
             entry_type: StoryEntryType::ToolResult {
-                tool_name: tool_name.to_string(),
                 success,
                 summary,
             },
@@ -191,7 +190,7 @@ impl StoryLogger {
                             serde_json::to_string_pretty(args).unwrap_or_else(|_| "Invalid JSON".to_string())));
                     }
                 },
-                StoryEntryType::ToolResult { tool_name: _, success, summary } => {
+                StoryEntryType::ToolResult { success, summary } => {
                     let status_icon = if *success { "✅" } else { "❌" };
                     markdown.push_str(&format!("**Result:** {} {}\n\n", status_icon, summary));
                 },

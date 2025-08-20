@@ -2,12 +2,14 @@ mod cli;
 mod config;
 mod engine;
 mod openrouter;
+mod story;
+mod terminal;
 mod tools;
 
 use clap::Parser;
 use cli::{Cli, Commands, ConfigCommand};
 use config::ConfigManager;
-use engine::BreakEngine;
+use engine::LooEngine;
 use std::fs;
 
 #[tokio::main]
@@ -27,7 +29,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .to_string_lossy()
                 .to_string();
 
-            let mut engine = BreakEngine::new(working_dir, cli.model, cli.verbose).await?;
+            let mut engine = LooEngine::new(working_dir, cli.model, cli.verbose).await?;
             engine.start_session(&project).await?;
         }
         Commands::Resume { session_id } => {

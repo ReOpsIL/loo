@@ -1,11 +1,12 @@
 use crate::config::{Config, ConfigManager};
 use crate::openrouter::{Message, OpenRouterClient};
 use crate::story::StoryLogger;
+use crate::terminal::{TerminalInput, InputEvent};
 use crate::tools::ToolExecutor;
 use serde_json::json;
 use uuid::Uuid;
 
-pub struct BreakEngine {
+pub struct LooEngine {
     openrouter_client: OpenRouterClient,
     tool_executor: ToolExecutor,
     story_logger: StoryLogger,
@@ -15,7 +16,7 @@ pub struct BreakEngine {
     messages: Vec<Message>,
 }
 
-impl BreakEngine {
+impl LooEngine {
     pub async fn new(
         working_dir: String,
         cli_model: Option<String>,
@@ -49,7 +50,7 @@ impl BreakEngine {
         })
     }
 
-    pub async fn start_session(&mut self, project_description: &str) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn start_session(&mut self, user_prompt: &str) -> Result<(), Box<dyn std::error::Error>> {
         println!("🚀 Starting Break CLI with OpenRouter");
         println!("📁 Working directory: {}", self.working_dir);
         println!("🆔 Session ID: {}", self.session_id);
@@ -72,7 +73,7 @@ impl BreakEngine {
         // Add user message
         let user_message = Message {
             role: "user".to_string(),
-            content: project_description.to_string(),
+            content: user_prompt.to_string(),
             tool_calls: None,
             tool_call_id: None,
         };
@@ -81,9 +82,64 @@ impl BreakEngine {
         self.messages.push(user_message);
 
         // Log the initial user prompt
-        self.story_logger.log_user_prompt(project_description);
+        self.story_logger.log_user_prompt(user_prompt);
 
-        // Main conversation loop
+        // Process the initial prompt first
+        self.process_conversation_turn().await?;
+
+        // Now enter interactive chat mode
+        println!("\n🎯 Interactive chat mode activated!");
+        println!("💡 Tips:");
+        println!("   • Press Ctrl+C three times to exit");
+        println!("   • Press ESC three times to clear your input");
+        println!("   • Type your messages and press Enter to send\n");
+
+        let mut terminal_input = TerminalInput::new();
+
+        // Interactive chat loop
+        loop {
+            match terminal_input.read_user_input().await? {
+                InputEvent::UserInput(user_message) => {
+                    // Add user message to conversation
+                    let user_msg = Message {
+                        role: "user".to_string(),
+                        content: user_message.clone(),
+                        tool_calls: None,
+                        tool_call_id: None,
+                    };
+                    self.messages.push(user_msg);
+                    self.story_logger.log_user_prompt(&user_message);
+
+                    // Process the conversation turn
+                    self.process_conversation_turn().await?;
+                }
+                InputEvent::ExitRequest(_count) => {
+                    println!("\n👋 Goodbye! Saving session story...");
+                    break;
+                }
+                InputEvent::ClearPrompt => {
+                    // This is handled in the terminal input module
+                    continue;
+                }
+                InputEvent::Interrupt => {
+                    println!("\n⚠️ Interrupted");
+                    continue;
+                }
+            }
+        }
+
+        // Generate story file at the end of session
+        if let Err(e) = self.story_logger.write_story_file() {
+            eprintln!("Warning: Failed to write story file: {}", e);
+        } else {
+            println!("📝 Session story saved to story.md");
+        }
+
+        Ok(())
+    }
+
+    async fn process_conversation_turn(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        // Main conversation processing loop
         loop {
             let response = self.openrouter_client
                 .chat_completion(self.messages.clone())
@@ -176,13 +232,6 @@ impl BreakEngine {
                 }
                 break;
             }
-        }
-
-        // Generate story file at the end of session
-        if let Err(e) = self.story_logger.write_story_file() {
-            eprintln!("Warning: Failed to write story file: {}", e);
-        } else {
-            println!("📝 Session story saved to story.md");
         }
 
         Ok(())

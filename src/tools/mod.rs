@@ -2,7 +2,7 @@ use crate::openrouter::ToolCall;
 use serde_json::{json, Value};
 use std::fs;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use tokio::signal;
 use tokio::process::Command as TokioCommand;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -157,7 +157,7 @@ impl ToolExecutor {
 
         let mut stdout_output = String::new();
         let mut stderr_output = String::new();
-        let mut interrupted = false;
+        let mut _interrupted = false;
 
         // Set up Ctrl+C handling
         tokio::select! {
@@ -207,7 +207,7 @@ impl ToolExecutor {
             }
             _ = signal::ctrl_c() => {
                 println!("  ⚠️  Ctrl+C detected, terminating process...");
-                interrupted = true;
+                _interrupted = true;
                 
                 // Kill the child process
                 let _ = child.kill().await;
