@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>DICOM Viewer</title>
+    <style>
+        body { font-family: Arial, sans-serif; display: flex; flex-direction: column; align-items: center; }
+        #viewerContainer { width: 512px; height: 512px; border: 1px solid black; margin-top: 20px; background-color: #eee; }
+        canvas { width: 100%; height: 100%; }
+        #controls { margin-top: 10px; }
+    </style>
+    <!-- Include dicomParser.js -->
+    <script src="lib/dicomParser.min.js"></script>
+</head>
+<body>
+    <h1>DICOM Viewer</h1>
+    <input type="file" id="dicomFolderInput" webkitdirectory directory multiple />
+    <div id="viewerContainer">
+        <canvas id="dicomCanvas"></canvas>
+    </div>
+    <div id="controls">
+        <button id="prevBtn">Previous</button>
+        <button id="nextBtn">Next</button>
+        <span id="sliceInfo">Slice: 0/0</span>
+    </div>
+
+    <script>
+        const dicomFolderInput = document.getElementById('dicomFolderInput');
+        const dicomCanvas = document.getElementById('dicomCanvas');
+        const ctx = dicomCanvas.getContext('2d');
+        const prevBtn = document.getElementById('prevBtn');
+        const nextBtn = document.getElementById('nextBtn');
+        const sliceInfo = document.getElementById('sliceInfo');
+
+        let dicomFiles = [];
+        let currentSliceIndex = 0;
+
+        dicomFolderInput.addEventListener('change', (event) => {
+            dicomFiles = Array.from(event.target.files);
+            // Filter for DICOM files and sort by name for consistent slice order
+            dicomFiles = dicomFiles.filter(file => file.name.endsWith('.dcm') || file.type === 'application/dicom');
+            dicomFiles.sort((a, b) => a.name.localeCompare(b.name));
+            
+            if (dicomFiles.length > 0) {
+                currentSliceIndex = 0;
+                loadAndDisplaySlice(currentSliceIndex);
+            } else {
+                alert('No DICOM files found in the selected folder.');
+            }
+        });
+
+        prevBtn.addEventListener('click', () => {
+            if (currentSliceIndex > 0) {
+                currentSliceIndex--;
+                loadAndDisplaySlice(currentSliceIndex);
+            }
+        });
+
+        nextBtn.addEventListener('click', () => {
+            if (currentSliceIndex < dicomFiles.length - 1) {
+                currentSliceIndex++;
+                loadAndDisplaySlice(currentSliceIndex);
+            }
+        });
+
+        function loadAndDisplaySlice(index) {
+            if (index >= 0 && index < dicomFiles.length) {
+                const file = dicomFiles[index];
+                sliceInfo.textContent = `Slice: ${index + 1}/${dicomFiles.length}`;
+
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    const arrayBuffer = e.target.result;
+                    
+                    try {
+                        const byteArray = new Uint8Array(arrayBuffer);
+                        const dataSet = dicomParser.parseDicom(byteArray);
+
+                        // Get image dimensions and pixel relevant info
+                        const rows = dataSet.uint16('x00280010'); // Rows
+                        const cols = dataSet.uint16('x00280011'); // Columns
+                        const bitsAllocated = dataSet.uint16('x00280100'); // Bits Allocated
+                        const pixelRepresentation = dataSet.uint16('x00280103'); // Pixel Representation (0 for unsigned, 1 for signed)
+                        const rescaleSlope = parseFloat(dataSet.string('x00281053')) || 1.0; // Rescale Slope
+                        const rescaleIntercept = parseFloat(dataSet.string('x00281052')) || 0.0; // Rescale Intercept
+
+                        if (!rows || !cols || !bitsAllocated) {
+                            throw new Error('Missing essential DICOM image tags (Rows, Columns, Bits Allocated).');
+                        }
+
+                        dicomCanvas.width = cols;
+                        dicomCanvas.height = rows;
+                        ctx.clearRect(0, 0, dicomCanvas.width, dicomCanvas.height);
+
+                        const pixelDataElement = dataSet.elements.x7fe00010;
+
+                        if (!pixelDataElement) {
+                            throw new Error('Pixel Data (7FE0,0010) element not found.');
+                        }
+                        
+                        // Handle different bits allocated
+                        if (bitsAllocated === 8) {
+                            const pixelData = new Uint8Array(arrayBuffer, pixelDataElement.dataOffset, pixelDataElement.length);
+                            const imageData = ctx.createImageData(cols, rows);
+                            const data = imageData.data;
+
+                            for (let i = 0; i < pixelData.length; i++) {
+                                const pixelValue = Math.round(pixelData[i] * rescaleSlope + rescaleIntercept); // Apply rescale for 8-bit too
+                                data[i * 4] = pixelValue;     // Red
+                                data[i * 4 + 1] = pixelValue; // Green
+                                data[i * 4 + 2] = pixelValue; // Blue
+                                data[i * 4 + 3] = 255;        // Alpha
+                            }
+                            ctx.putImageData(imageData, 0, 0);
+                            ctx.font = '14px Arial';
+                            ctx.fillStyle = 'rgba(255,255,255,0.8)';
+                            ctx.fillText(`Dimensions: ${cols}x${rows}, Bits: ${bitsAllocated}`, dicomCanvas.width / 2, dicomCanvas.height - 20);
+
+                        } else if (bitsAllocated === 16 && pixelRepresentation === 0) { // Unsigned 16-bit
+                            const pixelData = new Uint16Array(arrayBuffer, pixelDataElement.dataOffset, pixelDataElement.length / 2);
+                            const imageData = ctx.createImageData(cols, rows);
+                            const data = imageData.data;
+
+                            // Calculate min/max pixel values for auto windowing
+                            let minPixelValue = 65535; // Max for 16-bit unsigned
+                            let maxPixelValue = 0;
+
+                            for (let i = 0; i < pixelData.length; i++) {
+                                // Apply Modality LUT first
+                                const transformedPixel = pixelData[i] * rescaleSlope + rescaleIntercept;
+                                if (transformedPixel < minPixelValue) minPixelValue = transformedPixel;
+                                if (transformedPixel > maxPixelValue) maxPixelValue = transformedPixel;
+                            }
+
+                            const autoWindowWidth = maxPixelValue - minPixelValue;
+                            const autoWindowCenter = minPixelValue + (autoWindowWidth / 2);
+
+                            // Apply VOI LUT (Window/Level) and draw
+                            for (let i = 0; i < pixelData.length; i++) {
+                                const transformedPixel = pixelData[i] * rescaleSlope + rescaleIntercept;
+                                let pixelValue = (((transformedPixel - (autoWindowCenter - 0.5)) / (autoWindowWidth - 1)) + 0.5) * 255;
+                                
+                                // Clamp pixel values to 0-255 range
+                                pixelValue = Math.max(0, Math.min(255, pixelValue));
+                                pixelValue = Math.round(pixelValue);
+
+                                data[i * 4] = pixelValue;     // Red
+                                data[i * 4 + 1] = pixelValue; // Green
+                                data[i * 4 + 2] = pixelValue; // Blue
+                                data[i * 4 + 3] = 255;        // Alpha
+                            }
+                            ctx.putImageData(imageData, 0, 0);
+                            ctx.font = '14px Arial';
+                            ctx.fillStyle = 'rgba(255,255,255,0.8)';
+                            ctx.fillText(`Dimensions: ${cols}x${rows}, Bits: ${bitsAllocated}, Auto W/L Applied`, dicomCanvas.width / 2, dicomCanvas.height - 20);
+
+                        } else {
+                            ctx.fillStyle = 'black';
+                            ctx.fillRect(0, 0, dicomCanvas.width, dicomCanvas.height);
+                            ctx.font = '16px Arial';
+                            ctx.fillStyle = 'white';
+                            ctx.textAlign = 'center';
+                            if (pixelRepresentation === 1) {
+                                ctx.fillText(`Signed 16-bit images not supported yet.`, dicomCanvas.width / 2, dicomCanvas.height / 2);
+                            } else {
+                                ctx.fillText(`Unsupported bits allocated: ${bitsAllocated}.`, dicomCanvas.width / 2, dicomCanvas.height / 2);
+                            }
+                            ctx.fillText(`Dimensions: ${cols}x${rows}, Bits: ${bitsAllocated}`, dicomCanvas.width / 2, dicomCanvas.height / 2 + 20);
+                        }
+
+                    } catch (error) {
+                        console.error('Error processing DICOM file:', file.name, error);
+                        ctx.clearRect(0, 0, dicomCanvas.width, dicomCanvas.height);
+                        ctx.fillStyle = 'red';
+                        ctx.textAlign = 'center';
+                        ctx.font = '18px Arial';
+                        ctx.fillText(`Error loading/parsing: ${file.name}`, dicomCanvas.width / 2, dicomCanvas.height / 2 - 10);
+                        ctx.fillText(error.message, dicomCanvas.width / 2, dicomCanvas.height / 2 + 15);
+                        ctx.fillText('Check console for details.', dicomCanvas.width / 2, dicomCanvas.height / 2 + 40);
+                    }
+                };
+                reader.readAsArrayBuffer(file);
+            }
+        }
+    </script>
+</body>
+</html>

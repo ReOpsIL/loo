@@ -100,6 +100,23 @@ impl LooEngine {
         loop {
             match terminal_input.read_user_input().await? {
                 InputEvent::UserInput(user_message) => {
+                    // Check if this is a slash command
+                    if user_message.trim().starts_with('/') {
+                        match self.handle_slash_command(&user_message).await {
+                            Ok(handled) => {
+                                if handled {
+                                    // Command was handled internally, continue to next input
+                                    continue;
+                                }
+                                // Command not recognized, fall through to normal processing
+                            }
+                            Err(e) => {
+                                println!("❌ Error executing command: {}", e);
+                                continue;
+                            }
+                        }
+                    }
+
                     // Add user message to conversation
                     let user_msg = Message {
                         role: "user".to_string(),
@@ -245,5 +262,86 @@ impl LooEngine {
     #[allow(dead_code)]
     pub fn get_working_dir(&self) -> &str {
         &self.working_dir
+    }
+
+    async fn handle_slash_command(&mut self, command: &str) -> Result<bool, Box<dyn std::error::Error>> {
+        let parts: Vec<&str> = command.trim().split_whitespace().collect();
+        if parts.is_empty() {
+            return Ok(false);
+        }
+
+        let cmd = parts[0].trim_start_matches('/');
+        
+        match cmd {
+            "list-models" => {
+                let search_term = if parts.len() > 1 {
+                    parts[1..].join(" ")
+                } else {
+                    String::new()
+                };
+                
+                match self.openrouter_client.list_models(&search_term).await {
+                    Ok(models) => {
+                        if models.is_empty() {
+                            if search_term.is_empty() {
+                                println!("📋 No models available");
+                            } else {
+                                println!("📋 No models found matching '{}'", search_term);
+                            }
+                        } else {
+                            if search_term.is_empty() {
+                                println!("📋 Available models ({}):", models.len());
+                            } else {
+                                println!("📋 Models matching '{}' ({}):", search_term, models.len());
+                            }
+                            
+                            let max_items = std::cmp::min(models.len(), 10);
+                            for model in models.iter().take(max_items) {
+                                println!("  • {}", model);
+                            }
+                            
+                            if models.len() > max_items {
+                                println!("  ... and {} more", models.len() - max_items);
+                            }
+                        }
+                        Ok(true)
+                    }
+                    Err(e) => {
+                        println!("❌ Failed to fetch models: {}", e);
+                        Ok(true) // Still handled, just with error
+                    }
+                }
+            }
+            "model" => {
+                if parts.len() < 2 {
+                    println!("❌ Usage: /model <model_name>");
+                    println!("💡 Tip: Use /list-models to see available models");
+                    return Ok(true);
+                }
+                
+                let new_model = parts[1..].join(" ");
+                let old_model = self.config.openrouter.model.clone();
+                
+                // Update the model in config
+                self.config.openrouter.model = new_model.clone();
+                
+                // Update the OpenRouter client with new config
+                match crate::openrouter::OpenRouterClient::new(self.config.clone()).await {
+                    Ok(new_client) => {
+                        self.openrouter_client = new_client;
+                        println!("✅ Model changed from '{}' to '{}'", old_model, new_model);
+                        Ok(true)
+                    }
+                    Err(e) => {
+                        // Revert the model change on error
+                        self.config.openrouter.model = old_model;
+                        println!("❌ Failed to switch to model '{}': {}", new_model, e);
+                        println!("💡 Tip: Use /list-models to see available models");
+                        Ok(true) // Still handled, just with error
+                    }
+                }
+            }
+            _ => Ok(false) // Command not recognized
+        }
     }
 }

@@ -1,3 +1,4 @@
+use std::cmp::min;
 use crate::config::Config;
 use reqwest;
 use serde::{Deserialize, Serialize};
@@ -69,6 +70,18 @@ pub struct ErrorResponse {
 #[derive(Deserialize)]
 pub struct Choice {
     pub message: Message,
+}
+
+#[derive(Deserialize)]
+pub struct ModelsResponse {
+    pub data: Vec<Model>,
+}
+
+#[derive(Deserialize)]
+pub struct Model {
+    pub id: String,
+    pub name: Option<String>,
+    pub description: Option<String>,
 }
 
 pub struct OpenRouterClient {
@@ -272,7 +285,8 @@ impl OpenRouterClient {
         // Log the raw response for debugging
         let response_text = raw_response.text().await?;
         if self.config.preferences.verbose {
-            println!("🐛 Raw API response: {}", response_text);
+            let max_len = min(80, response_text.len());
+            println!("🐛 Raw API response: {}", response_text.get(..max_len).unwrap());
         }
 
         // Try to parse as error response first
@@ -284,5 +298,43 @@ impl OpenRouterClient {
         let response: OpenRouterResponse = serde_json::from_str(&response_text)?;
 
         Ok(response)
+    }
+
+    pub async fn list_models(&self, search_term: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+        let endpoint = format!("{}/models", self.config.openrouter.base_url);
+        
+        if self.config.preferences.verbose {
+            println!("🔗 Fetching models from: {}", endpoint);
+        }
+
+        let raw_response = self
+            .client
+            .get(&endpoint)
+            .send()
+            .await?;
+
+        let response_text = raw_response.text().await?;
+        if self.config.preferences.verbose {
+            let max_len = min(80, response_text.len());
+            println!("🐛 Raw models response: {}", response_text.get(..max_len).unwrap());
+        }
+
+        let models_response: ModelsResponse = serde_json::from_str(&response_text)?;
+        
+        let mut model_names: Vec<String> = models_response.data
+            .into_iter()
+            .map(|model| model.id)
+            .collect();
+
+        // Filter models if search term is provided
+        if !search_term.is_empty() {
+            let search_lower = search_term.to_lowercase();
+            model_names.retain(|name| name.to_lowercase().contains(&search_lower));
+        }
+
+        // Sort models alphabetically
+        model_names.sort();
+
+        Ok(model_names)
     }
 }
