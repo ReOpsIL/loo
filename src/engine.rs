@@ -502,24 +502,77 @@ impl LooEngine {
 
     /// Process a nested plan request
     async fn process_nested_plan_request(&mut self, id: String, request: String, depth: u8) -> Result<StackResponse, Box<dyn std::error::Error>> {
-        // Use the existing plan command functionality but at a nested level
-        use crate::commands::PlanCommand;
-        let plan_cmd = PlanCommand::new();
+        // For deeper recursion levels or simple tasks, try direct execution first
+        if depth >= 2 || self.is_executable_request(&request) {
+            return self.execute_direct_request(id, request).await;
+        }
         
-        match plan_cmd.execute(&request).await {
-            Ok(plan_result) => {
-                // Try to parse the plan result to extract actionable items
-                let sub_requests = self.extract_requests_from_plan_output(&plan_result, &id, depth + 1)?;
+        // Create a system message that instructs the LLM to either execute directly or provide specific sub-tasks
+        let system_message = Message {
+            role: "system".to_string(),
+            content: format!(
+                "You are a coding assistant. Working directory: {}. \
+                The user has requested: '{}'. \
+                You have two options: \
+                1) If this is a simple, directly executable task, use the available tools (create_file, create_directory, run_command, etc.) to implement it immediately. \
+                2) If this requires multiple steps, break it into 2-3 specific, actionable sub-tasks. \
+                Prefer option 1 (direct execution) when possible.",
+                self.working_dir, request
+            ),
+            tool_calls: None,
+            tool_call_id: None,
+        };
+
+        let user_message = Message {
+            role: "user".to_string(),
+            content: request.clone(),
+            tool_calls: None,
+            tool_call_id: None,
+        };
+
+        // Create temporary message list for this execution
+        let messages = vec![system_message, user_message];
+        
+        // Use the existing conversation processing logic
+        let temp_messages = self.messages.clone();
+        self.messages = messages;
+        
+        let result = self.process_conversation_turn().await;
+        
+        // Restore original messages
+        self.messages = temp_messages;
+        
+        match result {
+            Ok(()) => {
+                // Check if the LLM used tools (indicating direct execution)
+                // For now, assume it was successful
+                Ok(StackResponse {
+                    request_id: id.clone(),
+                    success: true,
+                    content: format!("Processed nested request: {}", request),
+                    generated_requests: Vec::new(),
+                    completed_actions: vec![id],
+                })
+            }
+            Err(e) => {
+                // If direct execution failed, fall back to creating sub-tasks
+                let sub_requests = vec![
+                    StackRequest::NestedPlan {
+                        id: format!("{}_retry", id),
+                        parent_id: id.clone(),
+                        request: format!("Retry with simpler approach: {}", request),
+                        depth: depth + 1
+                    }
+                ];
                 
                 Ok(StackResponse {
                     request_id: id,
-                    success: true,
-                    content: plan_result,
+                    success: false,
+                    content: format!("Initial attempt failed, retrying: {}", e),
                     generated_requests: sub_requests,
                     completed_actions: Vec::new(),
                 })
             }
-            Err(e) => Err(e.into())
         }
     }
 
@@ -532,6 +585,19 @@ impl LooEngine {
         request_lower.starts_with("write to file") ||
         request_lower.starts_with("run command") ||
         request_lower.starts_with("execute") ||
+        request_lower.starts_with("install") ||
+        request_lower.starts_with("generate") ||
+        request_lower.starts_with("implement") ||
+        request_lower.starts_with("build") ||
+        request_lower.starts_with("setup") ||
+        request_lower.starts_with("configure") ||
+        request_lower.starts_with("add") ||
+        request_lower.starts_with("modify") ||
+        request_lower.contains("npm install") ||
+        request_lower.contains("mkdir") ||
+        request_lower.contains(".js") ||
+        request_lower.contains(".json") ||
+        request_lower.contains(".css") ||
         request_lower.starts_with("delete") ||
         request_lower.starts_with("copy") ||
         request_lower.starts_with("move") ||
@@ -553,17 +619,61 @@ impl LooEngine {
     async fn execute_direct_request(&mut self, id: String, request: String) -> Result<StackResponse, Box<dyn std::error::Error>> {
         println!("⚙️ Executing direct request: {}", request);
         
-        // This would integrate with the existing tool system
-        // For now, simulate execution
-        let execution_result = format!("Executed: {}", request);
+        // Create a system message that instructs the LLM to use tools for implementation
+        let system_message = Message {
+            role: "system".to_string(),
+            content: format!(
+                "You are a coding assistant that MUST use the available tools to complete tasks. \
+                Working directory: {}. \
+                The user has requested: '{}'. \
+                You MUST use the appropriate tools (create_file, create_directory, run_command, etc.) to implement this request. \
+                Do not just provide explanations - execute the actual implementation using tools.",
+                self.working_dir, request
+            ),
+            tool_calls: None,
+            tool_call_id: None,
+        };
+
+        // Create user message
+        let user_message = Message {
+            role: "user".to_string(),
+            content: format!("Please implement this request using the available tools: {}", request),
+            tool_calls: None,
+            tool_call_id: None,
+        };
+
+        // Create temporary message list for this execution
+        let messages = vec![system_message, user_message];
         
-        Ok(StackResponse {
-            request_id: id.clone(),
-            success: true,
-            content: execution_result,
-            generated_requests: Vec::new(),
-            completed_actions: vec![id],
-        })
+        // Use the existing conversation processing logic
+        let temp_messages = self.messages.clone();
+        self.messages = messages;
+        
+        let result = self.process_conversation_turn().await;
+        
+        // Restore original messages
+        self.messages = temp_messages;
+        
+        match result {
+            Ok(()) => {
+                Ok(StackResponse {
+                    request_id: id.clone(),
+                    success: true,
+                    content: format!("Successfully executed: {}", request),
+                    generated_requests: Vec::new(),
+                    completed_actions: vec![id],
+                })
+            }
+            Err(e) => {
+                Ok(StackResponse {
+                    request_id: id.clone(),
+                    success: false,
+                    content: format!("Failed to execute: {} - Error: {}", request, e),
+                    generated_requests: Vec::new(),
+                    completed_actions: Vec::new(),
+                })
+            }
+        }
     }
 
     /// Execute a plan action using tools

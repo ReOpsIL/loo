@@ -16,6 +16,8 @@ pub struct TerminalInput {
     terminal_size: (u16, u16), // (width, height)
     prompt: String,
     autocomplete_engine: AutocompleteEngine,
+    kill_ring: String, // For cut/paste operations (Ctrl+Y)
+    previous_cursor_pos: Option<usize>, // For Ctrl+XX toggle
 }
 
 #[derive(Debug)]
@@ -45,6 +47,9 @@ struct TextBuffer {
     cursor_pos: usize, // Character position in content (NOT byte position)
     display_offset: usize, // For horizontal scrolling
     autocomplete_state: AutocompleteState,
+    wrapped_lines: Vec<String>, // For multi-line text wrapping
+    cursor_line: usize, // Which wrapped line the cursor is on
+    cursor_col: usize,  // Column position within the wrapped line
 }
 
 impl TextBuffer {
@@ -54,6 +59,9 @@ impl TextBuffer {
             cursor_pos: 0,
             display_offset: 0,
             autocomplete_state: AutocompleteState::None,
+            wrapped_lines: Vec::new(),
+            cursor_line: 0,
+            cursor_col: 0,
         }
     }
 
@@ -156,11 +164,155 @@ impl TextBuffer {
         }
     }
 
+    // Cut text from cursor to beginning of line (Ctrl+U)
+    fn cut_to_line_start(&mut self) -> String {
+        let byte_pos = self.char_to_byte_pos(self.cursor_pos);
+        let cut_text = self.content[..byte_pos].to_string();
+        self.content = self.content[byte_pos..].to_string();
+        self.cursor_pos = 0;
+        cut_text
+    }
+
+    // Cut text from cursor to end of line (Ctrl+K)
+    fn cut_to_line_end(&mut self) -> String {
+        let byte_pos = self.char_to_byte_pos(self.cursor_pos);
+        let cut_text = self.content[byte_pos..].to_string();
+        self.content = self.content[..byte_pos].to_string();
+        cut_text
+    }
+
+    // Cut word before cursor (Ctrl+W)
+    fn cut_word_before(&mut self) -> String {
+        let chars: Vec<char> = self.content.chars().collect();
+        let mut start_pos = self.cursor_pos;
+        
+        if start_pos == 0 {
+            return String::new();
+        }
+        
+        // Skip whitespace
+        while start_pos > 0 && chars.get(start_pos - 1).unwrap_or(&' ').is_whitespace() {
+            start_pos -= 1;
+        }
+        
+        // Skip word characters
+        while start_pos > 0 && !chars.get(start_pos - 1).unwrap_or(&' ').is_whitespace() {
+            start_pos -= 1;
+        }
+        
+        let start_byte = self.char_to_byte_pos(start_pos);
+        let end_byte = self.char_to_byte_pos(self.cursor_pos);
+        let cut_text = self.content[start_byte..end_byte].to_string();
+        
+        self.content.drain(start_byte..end_byte);
+        self.cursor_pos = start_pos;
+        
+        cut_text
+    }
+
+    // Delete word after cursor (Alt+D)
+    fn delete_word_after(&mut self) {
+        let chars: Vec<char> = self.content.chars().collect();
+        let char_len = chars.len();
+        let mut end_pos = self.cursor_pos;
+        
+        if end_pos >= char_len {
+            return;
+        }
+        
+        // Skip word characters
+        while end_pos < char_len && !chars.get(end_pos).unwrap_or(&' ').is_whitespace() {
+            end_pos += 1;
+        }
+        
+        // Skip whitespace
+        while end_pos < char_len && chars.get(end_pos).unwrap_or(&' ').is_whitespace() {
+            end_pos += 1;
+        }
+        
+        let start_byte = self.char_to_byte_pos(self.cursor_pos);
+        let end_byte = self.char_to_byte_pos(end_pos);
+        
+        self.content.drain(start_byte..end_byte);
+    }
+
+    // Insert text at cursor position (for paste - Ctrl+Y)
+    fn insert_text(&mut self, text: &str) {
+        let byte_pos = self.char_to_byte_pos(self.cursor_pos);
+        self.content.insert_str(byte_pos, text);
+        self.cursor_pos += text.chars().count();
+    }
+
+    // Calculate wrapped lines for display
+    fn calculate_wrapped_lines(&mut self, available_width: usize) {
+        self.wrapped_lines.clear();
+        
+        if available_width == 0 {
+            self.wrapped_lines.push(self.content.clone());
+            self.cursor_line = 0;
+            self.cursor_col = self.cursor_pos.min(self.content.chars().count());
+            return;
+        }
+        
+        let chars: Vec<char> = self.content.chars().collect();
+        let mut current_line = String::new();
+        let mut current_width = 0;
+        
+        for ch in chars {
+            let ch_width = ch.to_string().width();
+            
+            // If adding this character would exceed the width, wrap to next line
+            if current_width + ch_width > available_width && !current_line.is_empty() {
+                self.wrapped_lines.push(current_line.clone());
+                current_line.clear();
+                current_width = 0;
+            }
+            
+            current_line.push(ch);
+            current_width += ch_width;
+        }
+        
+        // Always push the last line, even if empty
+        self.wrapped_lines.push(current_line);
+        
+        // Update cursor line and column
+        self.update_cursor_position();
+    }
+
+    // Update cursor line and column based on cursor_pos
+    fn update_cursor_position(&mut self) {
+        let mut char_count = 0;
+        
+        self.cursor_line = 0;
+        self.cursor_col = 0;
+        
+        for (line_idx, line) in self.wrapped_lines.iter().enumerate() {
+            let line_char_count = line.chars().count();
+            
+            if char_count + line_char_count >= self.cursor_pos {
+                self.cursor_line = line_idx;
+                self.cursor_col = self.cursor_pos - char_count;
+                return;
+            }
+            
+            char_count += line_char_count;
+        }
+        
+        // If we get here, cursor is at the very end
+        if !self.wrapped_lines.is_empty() {
+            self.cursor_line = self.wrapped_lines.len() - 1;
+            self.cursor_col = self.wrapped_lines.last().unwrap().chars().count();
+        }
+    }
+
     fn clear(&mut self) {
         self.content.clear();
         self.cursor_pos = 0;
         self.display_offset = 0;
         self.autocomplete_state = AutocompleteState::None;
+        self.wrapped_lines.clear();
+        self.cursor_line = 0;
+        self.cursor_col = 0;
     }
 
     // Check if current position triggers autocomplete
@@ -255,6 +407,8 @@ impl TerminalInput {
             terminal_size: size,
             prompt: "💬 You: ".to_string(),
             autocomplete_engine: AutocompleteEngine::new(working_dir),
+            kill_ring: String::new(),
+            previous_cursor_pos: None,
         }
     }
 
@@ -275,7 +429,7 @@ impl TerminalInput {
         self.terminal_size = terminal::size().unwrap_or(self.terminal_size);
 
         // Show initial prompt
-        self.render_input(&mut stdout, &buffer)?;
+        self.render_input(&mut stdout, &mut buffer)?;
 
         loop {
             if event::poll(std::time::Duration::from_millis(100))? {
@@ -321,11 +475,11 @@ impl TerminalInput {
                                 if continue_browsing {
                                     // Update autocomplete to show folder contents
                                     self.update_autocomplete(&mut buffer)?;
-                                    self.render_with_autocomplete(&mut stdout, &buffer)?;
+                                    self.render_with_autocomplete(&mut stdout, &mut buffer)?;
                                 } else {
                                     // Clear autocomplete menu and render normal input
                                     execute!(stdout, Clear(ClearType::FromCursorDown))?;
-                                    self.render_input(&mut stdout, &buffer)?;
+                                    self.render_input(&mut stdout, &mut buffer)?;
                                 }
                                 continue;
                             }
@@ -365,7 +519,7 @@ impl TerminalInput {
                                     None => {
                                         // Command not found, treat as normal input
                                         enable_raw_mode()?;
-                                        self.render_input(&mut stdout, &buffer)?;
+                                        self.render_input(&mut stdout, &mut buffer)?;
                                         continue;
                                     }
                                 }
@@ -377,7 +531,7 @@ impl TerminalInput {
                             
                             if buffer.content.trim().is_empty() {
                                 enable_raw_mode()?;
-                                self.render_input(&mut stdout, &buffer)?;
+                                self.render_input(&mut stdout, &mut buffer)?;
                                 continue;
                             }
                             
@@ -408,12 +562,177 @@ impl TerminalInput {
                                     Print(format!("(Press {} more times to exit)\n", remaining)),
                                     ResetColor
                                 )?;
-                                self.render_input(&mut stdout, &buffer)?;
+                                self.render_input(&mut stdout, &mut buffer)?;
                             } else {
                                 execute!(stdout, ResetColor, Print("\n"))?;
                                 disable_raw_mode()?;
                                 return Ok(InputEvent::ExitRequest(self.exit_count));
                             }
+                        }
+
+                        // Additional Ctrl shortcuts
+                        // Ctrl+A - Move to beginning of line
+                        KeyEvent {
+                            code: KeyCode::Char('a'),
+                            modifiers: KeyModifiers::CONTROL,
+                            ..
+                        } => {
+                            buffer.move_cursor_home();
+                            self.render_input(&mut stdout, &mut buffer)?;
+                        }
+
+                        // Ctrl+E - Move to end of line
+                        KeyEvent {
+                            code: KeyCode::Char('e'),
+                            modifiers: KeyModifiers::CONTROL,
+                            ..
+                        } => {
+                            buffer.move_cursor_end();
+                            self.render_input(&mut stdout, &mut buffer)?;
+                        }
+
+                        // Ctrl+B - Move cursor backward one character
+                        KeyEvent {
+                            code: KeyCode::Char('b'),
+                            modifiers: KeyModifiers::CONTROL,
+                            ..
+                        } => {
+                            buffer.move_cursor_left();
+                            self.render_input(&mut stdout, &mut buffer)?;
+                        }
+
+                        // Ctrl+F - Move cursor forward one character
+                        KeyEvent {
+                            code: KeyCode::Char('f'),
+                            modifiers: KeyModifiers::CONTROL,
+                            ..
+                        } => {
+                            buffer.move_cursor_right();
+                            self.render_input(&mut stdout, &mut buffer)?;
+                        }
+
+                        // Ctrl+U - Cut text from cursor to beginning of line
+                        KeyEvent {
+                            code: KeyCode::Char('u'),
+                            modifiers: KeyModifiers::CONTROL,
+                            ..
+                        } => {
+                            let cut_text = buffer.cut_to_line_start();
+                            if !cut_text.is_empty() {
+                                self.kill_ring = cut_text;
+                            }
+                            self.render_input(&mut stdout, &mut buffer)?;
+                        }
+
+                        // Ctrl+K - Cut text from cursor to end of line
+                        KeyEvent {
+                            code: KeyCode::Char('k'),
+                            modifiers: KeyModifiers::CONTROL,
+                            ..
+                        } => {
+                            let cut_text = buffer.cut_to_line_end();
+                            if !cut_text.is_empty() {
+                                self.kill_ring = cut_text;
+                            }
+                            self.render_input(&mut stdout, &mut buffer)?;
+                        }
+
+                        // Ctrl+W - Cut word before cursor
+                        KeyEvent {
+                            code: KeyCode::Char('w'),
+                            modifiers: KeyModifiers::CONTROL,
+                            ..
+                        } => {
+                            let cut_text = buffer.cut_word_before();
+                            if !cut_text.is_empty() {
+                                self.kill_ring = cut_text;
+                            }
+                            self.render_input(&mut stdout, &mut buffer)?;
+                        }
+
+                        // Ctrl+Y - Paste from kill ring
+                        KeyEvent {
+                            code: KeyCode::Char('y'),
+                            modifiers: KeyModifiers::CONTROL,
+                            ..
+                        } => {
+                            if !self.kill_ring.is_empty() {
+                                buffer.insert_text(&self.kill_ring.clone());
+                                self.render_input(&mut stdout, &mut buffer)?;
+                            }
+                        }
+
+                        // Ctrl+D - Delete character under cursor or exit if line empty
+                        KeyEvent {
+                            code: KeyCode::Char('d'),
+                            modifiers: KeyModifiers::CONTROL,
+                            ..
+                        } => {
+                            if buffer.content.is_empty() {
+                                execute!(stdout, Print("\n"))?;
+                                disable_raw_mode()?;
+                                return Ok(InputEvent::ExitRequest(3));
+                            } else {
+                                buffer.delete_char_at();
+                                self.render_input(&mut stdout, &mut buffer)?;
+                            }
+                        }
+
+                        // Ctrl+L - Clear screen
+                        KeyEvent {
+                            code: KeyCode::Char('l'),
+                            modifiers: KeyModifiers::CONTROL,
+                            ..
+                        } => {
+                            execute!(stdout, Clear(ClearType::All), cursor::MoveTo(0, 0))?;
+                            self.render_input(&mut stdout, &mut buffer)?;
+                        }
+
+                        // Ctrl+XX - Toggle cursor position
+                        KeyEvent {
+                            code: KeyCode::Char('x'),
+                            modifiers: KeyModifiers::CONTROL,
+                            ..
+                        } => {
+                            if let Some(prev_pos) = self.previous_cursor_pos {
+                                let current_pos = buffer.cursor_pos;
+                                buffer.cursor_pos = prev_pos;
+                                self.previous_cursor_pos = Some(current_pos);
+                            } else {
+                                self.previous_cursor_pos = Some(buffer.cursor_pos);
+                                buffer.move_cursor_home();
+                            }
+                            self.render_input(&mut stdout, &mut buffer)?;
+                        }
+
+                        // Alt+B - Move cursor backward one word
+                        KeyEvent {
+                            code: KeyCode::Char('b'),
+                            modifiers: KeyModifiers::ALT,
+                            ..
+                        } => {
+                            buffer.move_cursor_word_left();
+                            self.render_input(&mut stdout, &mut buffer)?;
+                        }
+
+                        // Alt+F - Move cursor forward one word
+                        KeyEvent {
+                            code: KeyCode::Char('f'),
+                            modifiers: KeyModifiers::ALT,
+                            ..
+                        } => {
+                            buffer.move_cursor_word_right();
+                            self.render_input(&mut stdout, &mut buffer)?;
+                        }
+
+                        // Alt+D - Delete word after cursor
+                        KeyEvent {
+                            code: KeyCode::Char('d'),
+                            modifiers: KeyModifiers::ALT,
+                            ..
+                        } => {
+                            buffer.delete_word_after();
+                            self.render_input(&mut stdout, &mut buffer)?;
                         }
 
                         // ESC key handling
@@ -426,7 +745,7 @@ impl TerminalInput {
                                 buffer.autocomplete_state = AutocompleteState::None;
                                 // Clear the screen from cursor down to remove autocomplete display
                                 execute!(stdout, Clear(ClearType::FromCursorDown))?;
-                                self.render_input(&mut stdout, &buffer)?;
+                                self.render_input(&mut stdout, &mut buffer)?;
                                 // Reset ESC count since we handled the escape
                                 self.esc_count = 0;
                             } else {
@@ -446,7 +765,7 @@ impl TerminalInput {
                                         ResetColor
                                     )?;
                                     
-                                    self.render_input(&mut stdout, &buffer)?;
+                                    self.render_input(&mut stdout, &mut buffer)?;
                                 } else {
                                     execute!(
                                         stdout,
@@ -465,7 +784,7 @@ impl TerminalInput {
                             ..
                         } => {
                             buffer.move_cursor_word_left();
-                            self.render_input(&mut stdout, &buffer)?;
+                            self.render_input(&mut stdout, &mut buffer)?;
                         }
 
                         KeyEvent {
@@ -474,7 +793,7 @@ impl TerminalInput {
                             ..
                         } => {
                             buffer.move_cursor_word_right();
-                            self.render_input(&mut stdout, &buffer)?;
+                            self.render_input(&mut stdout, &mut buffer)?;
                         }
 
                         // Up arrow - navigate autocomplete
@@ -486,13 +805,13 @@ impl TerminalInput {
                                 AutocompleteState::FileSystem { selected_index, suggestions } => {
                                     if !suggestions.is_empty() && *selected_index > 0 {
                                         *selected_index -= 1;
-                                        self.render_with_autocomplete(&mut stdout, &buffer)?;
+                                        self.render_with_autocomplete(&mut stdout, &mut buffer)?;
                                     }
                                 }
                                 AutocompleteState::Command { selected_index, suggestions } => {
                                     if !suggestions.is_empty() && *selected_index > 0 {
                                         *selected_index -= 1;
-                                        self.render_with_autocomplete(&mut stdout, &buffer)?;
+                                        self.render_with_autocomplete(&mut stdout, &mut buffer)?;
                                     }
                                 }
                                 AutocompleteState::None => {
@@ -510,13 +829,13 @@ impl TerminalInput {
                                 AutocompleteState::FileSystem { selected_index, suggestions } => {
                                     if !suggestions.is_empty() && *selected_index < suggestions.len() - 1 {
                                         *selected_index += 1;
-                                        self.render_with_autocomplete(&mut stdout, &buffer)?;
+                                        self.render_with_autocomplete(&mut stdout, &mut buffer)?;
                                     }
                                 }
                                 AutocompleteState::Command { selected_index, suggestions } => {
                                     if !suggestions.is_empty() && *selected_index < suggestions.len() - 1 {
                                         *selected_index += 1;
-                                        self.render_with_autocomplete(&mut stdout, &buffer)?;
+                                        self.render_with_autocomplete(&mut stdout, &mut buffer)?;
                                     }
                                 }
                                 AutocompleteState::None => {
@@ -530,7 +849,7 @@ impl TerminalInput {
                             ..
                         } => {
                             buffer.move_cursor_left();
-                            self.render_input(&mut stdout, &buffer)?;
+                            self.render_input(&mut stdout, &mut buffer)?;
                         }
 
                         KeyEvent {
@@ -538,7 +857,7 @@ impl TerminalInput {
                             ..
                         } => {
                             buffer.move_cursor_right();
-                            self.render_input(&mut stdout, &buffer)?;
+                            self.render_input(&mut stdout, &mut buffer)?;
                         }
 
                         KeyEvent {
@@ -546,7 +865,7 @@ impl TerminalInput {
                             ..
                         } => {
                             buffer.move_cursor_home();
-                            self.render_input(&mut stdout, &buffer)?;
+                            self.render_input(&mut stdout, &mut buffer)?;
                         }
 
                         KeyEvent {
@@ -554,7 +873,7 @@ impl TerminalInput {
                             ..
                         } => {
                             buffer.move_cursor_end();
-                            self.render_input(&mut stdout, &buffer)?;
+                            self.render_input(&mut stdout, &mut buffer)?;
                         }
 
                         // Editing keys
@@ -579,9 +898,9 @@ impl TerminalInput {
                                 }
                                 
                                 if has_autocomplete {
-                                    self.render_with_autocomplete(&mut stdout, &buffer)?;
+                                    self.render_with_autocomplete(&mut stdout, &mut buffer)?;
                                 } else {
-                                    self.render_input(&mut stdout, &buffer)?;
+                                    self.render_input(&mut stdout, &mut buffer)?;
                                 }
                             }
                         }
@@ -592,39 +911,10 @@ impl TerminalInput {
                         } => {
                             if buffer.delete_char_at() {
                                 self.esc_count = 0;
-                                self.render_input(&mut stdout, &buffer)?;
+                                self.render_input(&mut stdout, &mut buffer)?;
                             }
                         }
 
-                        // Ctrl+A - Home
-                        KeyEvent {
-                            code: KeyCode::Char('a'),
-                            modifiers: KeyModifiers::CONTROL,
-                            ..
-                        } => {
-                            buffer.move_cursor_home();
-                            self.render_input(&mut stdout, &buffer)?;
-                        }
-
-                        // Ctrl+E - End
-                        KeyEvent {
-                            code: KeyCode::Char('e'),
-                            modifiers: KeyModifiers::CONTROL,
-                            ..
-                        } => {
-                            buffer.move_cursor_end();
-                            self.render_input(&mut stdout, &buffer)?;
-                        }
-
-                        // Ctrl+U - Clear line
-                        KeyEvent {
-                            code: KeyCode::Char('u'),
-                            modifiers: KeyModifiers::CONTROL,
-                            ..
-                        } => {
-                            buffer.clear();
-                            self.render_input(&mut stdout, &buffer)?;
-                        }
 
                         // Regular character input
                         KeyEvent {
@@ -639,7 +929,7 @@ impl TerminalInput {
                                 buffer.insert_char(c);
                                 // Clear the screen from cursor down to remove autocomplete display
                                 execute!(stdout, Clear(ClearType::FromCursorDown))?;
-                                self.render_input(&mut stdout, &buffer)?;
+                                self.render_input(&mut stdout, &mut buffer)?;
                             } 
                             // Ignore @ when already in file system autocomplete mode
                             else if c == '@' && matches!(buffer.autocomplete_state, AutocompleteState::FileSystem { .. }) {
@@ -654,9 +944,9 @@ impl TerminalInput {
                                 self.update_autocomplete(&mut buffer)?;
                                 
                                 if matches!(buffer.autocomplete_state, AutocompleteState::None) {
-                                    self.render_input(&mut stdout, &buffer)?;
+                                    self.render_input(&mut stdout, &mut buffer)?;
                                 } else {
-                                    self.render_with_autocomplete(&mut stdout, &buffer)?;
+                                    self.render_with_autocomplete(&mut stdout, &mut buffer)?;
                                 }
                             }
                         }
@@ -670,7 +960,7 @@ impl TerminalInput {
                                 buffer.insert_char(' ');
                             }
                             self.esc_count = 0;
-                            self.render_input(&mut stdout, &buffer)?;
+                            self.render_input(&mut stdout, &mut buffer)?;
                         }
 
                         _ => {
@@ -683,92 +973,105 @@ impl TerminalInput {
         }
     }
 
-    fn render_input(&self, stdout: &mut Stdout, buffer: &TextBuffer) -> Result<(), Box<dyn std::error::Error>> {
+    fn render_input(&self, stdout: &mut Stdout, buffer: &mut TextBuffer) -> Result<(), Box<dyn std::error::Error>> {
         let prompt_width = self.prompt.width();
         let available_width = (self.terminal_size.0 as usize).saturating_sub(prompt_width);
         
-        let text_chars: Vec<char> = buffer.content.chars().collect();
-        
-        // Calculate display width up to cursor position
-        let cursor_text: String = text_chars[..buffer.cursor_pos].iter().collect();
-        let cursor_display_width = cursor_text.width();
-        
-        // Calculate what part of the text to display and cursor position
-        let (display_text, cursor_display_pos) = if buffer.content.width() <= available_width {
-            // Text fits entirely on screen
-            (buffer.content.clone(), cursor_display_width)
-        } else {
-            // Text is longer than available width - need horizontal scrolling
-            // We need to find a good window that keeps the cursor visible
+        // For very long text that would wrap, show it with visual indicators
+        if buffer.content.width() > available_width {
+            // Use horizontal scrolling with wrap indicators
+            let text_chars: Vec<char> = buffer.content.chars().collect();
+            let cursor_text: String = text_chars[..buffer.cursor_pos].iter().collect();
+            let cursor_display_width = cursor_text.width();
             
-            // Try to keep cursor in the middle of the visible area when possible
-            let desired_cursor_pos = available_width / 2;
+            // Keep cursor in center third of screen when possible
+            let center_start = available_width / 3;
+            let center_end = 2 * available_width / 3;
             
-            if cursor_display_width < desired_cursor_pos {
-                // Cursor is near the beginning, show from start
-                let mut display_width = 0;
-                let mut end_char_idx = 0;
-                
-                for (i, ch) in text_chars.iter().enumerate() {
-                    let ch_width = ch.to_string().width();
-                    if display_width + ch_width > available_width {
-                        break;
+            let (display_text, cursor_pos, has_more_left, has_more_right) = 
+                if cursor_display_width < center_start {
+                    // Show from beginning
+                    let mut display_width = 0;
+                    let mut end_idx = 0;
+                    
+                    for (i, ch) in text_chars.iter().enumerate() {
+                        let ch_width = ch.to_string().width();
+                        if display_width + ch_width > available_width - 1 { // Leave space for indicator
+                            break;
+                        }
+                        display_width += ch_width;
+                        end_idx = i + 1;
                     }
-                    display_width += ch_width;
-                    end_char_idx = i + 1;
-                }
-                
-                let display_chars: String = text_chars[..end_char_idx].iter().collect();
-                (display_chars, cursor_display_width)
-            } else {
-                // Cursor is further right, need to scroll
-                let target_start_width = cursor_display_width.saturating_sub(desired_cursor_pos);
-                
-                // Find the character index where we should start displaying
-                let mut current_width = 0;
-                let mut start_char_idx = 0;
-                
-                for (i, ch) in text_chars.iter().enumerate() {
-                    let ch_width = ch.to_string().width();
-                    if current_width >= target_start_width {
-                        start_char_idx = i;
-                        break;
+                    
+                    let text: String = text_chars[..end_idx].iter().collect();
+                    let has_more = end_idx < text_chars.len();
+                    (text, cursor_display_width, false, has_more)
+                } else {
+                    // Show window around cursor
+                    let start_width = cursor_display_width.saturating_sub(center_start);
+                    
+                    let mut current_width = 0;
+                    let mut start_idx = 0;
+                    for (i, ch) in text_chars.iter().enumerate() {
+                        if current_width >= start_width {
+                            start_idx = i;
+                            break;
+                        }
+                        current_width += ch.to_string().width();
                     }
-                    current_width += ch_width;
-                }
-                
-                // Now find how much text we can display from this start position
-                let mut display_width = 0;
-                let mut end_char_idx = start_char_idx;
-                
-                for (i, ch) in text_chars[start_char_idx..].iter().enumerate() {
-                    let ch_width = ch.to_string().width();
-                    if display_width + ch_width > available_width {
-                        break;
+                    
+                    let mut display_width = 0;
+                    let mut end_idx = start_idx;
+                    let reserved_width = if start_idx > 0 { 1 } else { 0 } + 1; // Space for indicators
+                    
+                    for (i, ch) in text_chars[start_idx..].iter().enumerate() {
+                        let ch_width = ch.to_string().width();
+                        if display_width + ch_width > available_width - reserved_width {
+                            break;
+                        }
+                        display_width += ch_width;
+                        end_idx = start_idx + i + 1;
                     }
-                    display_width += ch_width;
-                    end_char_idx = start_char_idx + i + 1;
-                }
-                
-                let display_chars: String = text_chars[start_char_idx..end_char_idx].iter().collect();
-                
-                // Calculate cursor position within the displayed text
-                let prefix_text: String = text_chars[start_char_idx..buffer.cursor_pos].iter().collect();
-                let cursor_pos_in_display = prefix_text.width();
-                
-                (display_chars, cursor_pos_in_display)
+                    
+                    let text: String = text_chars[start_idx..end_idx].iter().collect();
+                    let cursor_pos = cursor_display_width - current_width;
+                    let has_left = start_idx > 0;
+                    let has_right = end_idx < text_chars.len();
+                    
+                    (text, cursor_pos, has_left, has_right)
+                };
+            
+            // Render with indicators
+            execute!(stdout, cursor::MoveToColumn(0), Clear(ClearType::CurrentLine))?;
+            execute!(stdout, Print(&self.prompt))?;
+            
+            if has_more_left {
+                execute!(stdout, SetForegroundColor(Color::DarkGrey), Print("«"), ResetColor)?;
             }
-        };
-
-        // Clear the current line and render new content
-        execute!(
-            stdout,
-            cursor::MoveToColumn(0),
-            Clear(ClearType::CurrentLine),
-            Print(&self.prompt),
-            Print(&display_text),
-            cursor::MoveToColumn((prompt_width + cursor_display_pos) as u16)
-        )?;
+            
+            execute!(stdout, Print(&display_text))?;
+            
+            if has_more_right {
+                execute!(stdout, SetForegroundColor(Color::DarkGrey), Print("»"), ResetColor)?;
+            }
+            
+            // Position cursor
+            let final_cursor_pos = prompt_width + if has_more_left { 1 } else { 0 } + cursor_pos;
+            execute!(stdout, cursor::MoveToColumn(final_cursor_pos as u16))?;
+        } else {
+            // Text fits on one line - simple render
+            execute!(
+                stdout,
+                cursor::MoveToColumn(0),
+                Clear(ClearType::CurrentLine),
+                Print(&self.prompt),
+                Print(&buffer.content)
+            )?;
+            
+            let cursor_text: String = buffer.content.chars().take(buffer.cursor_pos).collect();
+            let cursor_display_width = cursor_text.width();
+            execute!(stdout, cursor::MoveToColumn((prompt_width + cursor_display_width) as u16))?;
+        }
 
         stdout.flush()?;
         Ok(())
@@ -818,7 +1121,7 @@ impl TerminalInput {
         Ok(())
     }
 
-    fn render_with_autocomplete(&self, stdout: &mut Stdout, buffer: &TextBuffer) -> Result<(), Box<dyn std::error::Error>> {
+    fn render_with_autocomplete(&self, stdout: &mut Stdout, buffer: &mut TextBuffer) -> Result<(), Box<dyn std::error::Error>> {
         // Clear screen from current line down and render the input
         execute!(
             stdout,
