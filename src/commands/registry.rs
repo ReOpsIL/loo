@@ -206,6 +206,30 @@ fn handle_list_models_command(args: &str) -> CommandResult {
     Err(format!("ENGINE_COMMAND:list-models:{}", search_term).into())
 }
 
+fn handle_stack_status_command(_args: &str) -> CommandResult {
+    Err("ENGINE_COMMAND:stack-status".into())
+}
+
+fn handle_stack_execute_command(_args: &str) -> CommandResult {
+    Err("ENGINE_COMMAND:stack-execute".into())
+}
+
+fn handle_stack_clear_command(_args: &str) -> CommandResult {
+    Err("ENGINE_COMMAND:stack-clear".into())
+}
+
+fn handle_stack_auto_command(args: &str) -> CommandResult {
+    Err(format!("ENGINE_COMMAND:stack-auto:{}", args).into())
+}
+
+fn handle_stack_push_command(args: &str) -> CommandResult {
+    if args.trim().is_empty() {
+        Err("Usage: /stack-push <prompt> [priority]".into())
+    } else {
+        Err(format!("ENGINE_COMMAND:stack-push:{}", args).into())
+    }
+}
+
 /// Register all built-in commands
 fn register_builtin_commands() {
     with_registry_mut(|registry| {
@@ -216,6 +240,13 @@ fn register_builtin_commands() {
         
         // Register plan command that needs engine context  
         registry.register("plan", "Generate detailed action plan for coding tasks", handle_plan_command, true);
+        
+        // Register stack management commands
+        registry.register("stack-status", "Show execution stack status", handle_stack_status_command, true);
+        registry.register("stack-execute", "Execute pending items in the stack", handle_stack_execute_command, true);
+        registry.register("stack-clear", "Clear the execution stack", handle_stack_clear_command, true);
+        registry.register("stack-auto", "Toggle automatic stack execution", handle_stack_auto_command, true);
+        registry.register("stack-push", "Push a prompt to the execution stack", handle_stack_push_command, true);
     });
 }
 

@@ -3,6 +3,8 @@ mod cli;
 mod commands;
 mod config;
 mod engine;
+mod execution_stack;
+mod llm_schemas;
 mod openrouter;
 mod plan_display;
 mod story;

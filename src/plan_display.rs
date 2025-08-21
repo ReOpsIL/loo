@@ -1,6 +1,6 @@
 use std::fmt;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ActionPlan {
     pub title: String,
     pub overview: String,
@@ -8,14 +8,14 @@ pub struct ActionPlan {
     pub expected_outcome: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Phase {
     pub name: String,
     pub emoji: String,
     pub actions: Vec<Action>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Action {
     pub id: usize,
     pub title: String,
@@ -28,7 +28,7 @@ pub struct Action {
     pub status: ActionStatus,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum ActionStatus {
     Pending,
     InProgress,

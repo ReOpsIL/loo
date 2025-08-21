@@ -78,17 +78,127 @@ pub async fn handle_model_command(engine: &mut LooEngine, args: &str) -> Command
     }
 }
 
-/// Generate detailed action plan for coding tasks
-pub async fn handle_plan_command(_engine: &LooEngine, request: &str) -> CommandResult {
+/// Generate detailed action plan for coding tasks and execute via stack
+pub async fn handle_plan_command(engine: &mut LooEngine, request: &str) -> CommandResult {
     if request.trim().is_empty() {
         return Err("Plan command requires a request description".into());
     }
+
+    println!("🎯 Generating plan and adding to execution stack...");
 
     use crate::commands::PlanCommand;
     let plan_cmd = PlanCommand::new();
     
     match plan_cmd.execute(request.trim()).await {
-        Ok(result) => Ok(result),
-        Err(e) => Err(format!("Plan execution error: {}", e).into()),
+        Ok(result) => {
+            // Display the generated plan
+            println!("{}", result);
+            
+            // Also try to parse and push to execution stack if possible
+            match plan_cmd.parse_plan_json(&result) {
+                Ok(action_plan) => {
+                    println!("\n📋 Converting plan to execution stack...");
+                    let request_ids = engine.push_action_plan(action_plan);
+                    println!("✅ Added {} action items to execution stack", request_ids.len());
+                    
+                    // Start stack execution if enabled
+                    if engine.auto_execute_stack {
+                        println!("\n🚀 Starting recursive execution...");
+                        if let Err(e) = engine.start_stack_execution().await {
+                            println!("❌ Stack execution error: {}", e);
+                        }
+                    } else {
+                        println!("💡 Stack execution disabled. Use /stack-execute to run manually.");
+                    }
+                    
+                    Ok(format!("{}\n\n📊 {}", result, engine.get_stack_status()))
+                }
+                Err(parse_err) => {
+                    // If parsing fails, still push as a user prompt for decomposition
+                    println!("⚠️ Could not parse structured plan, pushing as user request: {}", parse_err);
+                    let request_id = engine.push_user_prompt(request.trim(), 3);
+                    println!("📥 Pushed user prompt to stack: {}", request_id);
+                    
+                    if engine.auto_execute_stack {
+                        println!("\n🚀 Starting recursive execution...");
+                        if let Err(e) = engine.start_stack_execution().await {
+                            println!("❌ Stack execution error: {}", e);
+                        }
+                    }
+                    
+                    Ok(format!("{}\n\n📊 {}", result, engine.get_stack_status()))
+                }
+            }
+        }
+        Err(e) => {
+            // If plan generation fails, push as user prompt anyway
+            println!("⚠️ Plan generation failed, pushing as user request for decomposition");
+            let request_id = engine.push_user_prompt(request.trim(), 3);
+            println!("📥 Pushed user prompt to stack: {}", request_id);
+            
+            if engine.auto_execute_stack {
+                println!("\n🚀 Starting recursive execution...");
+                if let Err(stack_err) = engine.start_stack_execution().await {
+                    println!("❌ Stack execution error: {}", stack_err);
+                }
+            }
+            
+            Err(format!("Plan execution error: {}. Request added to execution stack for decomposition.", e).into())
+        }
     }
+}
+
+/// Show execution stack status
+pub async fn handle_stack_status_command(engine: &LooEngine, _args: &str) -> CommandResult {
+    Ok(engine.get_stack_status())
+}
+
+/// Execute pending items in the stack
+pub async fn handle_stack_execute_command(engine: &mut LooEngine, _args: &str) -> CommandResult {
+    if !engine.execution_stack.has_pending_requests() {
+        return Ok("📋 No pending requests in execution stack".to_string());
+    }
+
+    println!("🚀 Starting manual stack execution...");
+    match engine.start_stack_execution().await {
+        Ok(()) => Ok("✅ Stack execution completed successfully".to_string()),
+        Err(e) => Err(format!("❌ Stack execution failed: {}", e).into()),
+    }
+}
+
+/// Clear the execution stack
+pub async fn handle_stack_clear_command(engine: &mut LooEngine, _args: &str) -> CommandResult {
+    engine.clear_stack();
+    Ok("🧹 Execution stack cleared".to_string())
+}
+
+/// Toggle automatic stack execution
+pub async fn handle_stack_auto_command(engine: &mut LooEngine, args: &str) -> CommandResult {
+    let enabled = match args.trim().to_lowercase().as_str() {
+        "on" | "true" | "1" | "enable" | "enabled" => true,
+        "off" | "false" | "0" | "disable" | "disabled" => false,
+        "" => !engine.auto_execute_stack, // Toggle if no argument
+        _ => return Err("Usage: /stack-auto [on|off]".into()),
+    };
+    
+    engine.set_auto_execute(enabled);
+    Ok(format!("🔄 Automatic stack execution: {}", if enabled { "enabled" } else { "disabled" }))
+}
+
+/// Push a user prompt to the stack
+pub async fn handle_stack_push_command(engine: &mut LooEngine, args: &str) -> CommandResult {
+    if args.trim().is_empty() {
+        return Err("Usage: /stack-push <prompt> [priority]".into());
+    }
+    
+    let parts: Vec<&str> = args.trim().splitn(2, ' ').collect();
+    let prompt = if parts.len() > 1 { parts[0] } else { args.trim() };
+    let priority = if parts.len() > 1 { 
+        parts[1].parse().unwrap_or(3) 
+    } else { 
+        3 
+    };
+    
+    let request_id = engine.push_user_prompt(prompt, priority);
+    Ok(format!("📥 Pushed prompt to stack: {} (priority: {})", request_id, priority))
 }
