@@ -19,7 +19,9 @@ struct CustomTextAutocomplete {
 
 impl CustomTextAutocomplete {
     fn new(working_dir: String) -> Self {
-        Self { working_dir }
+        Self { 
+            working_dir,
+        }
     }
 }
 
@@ -53,15 +55,28 @@ impl Autocomplete for CustomTextAutocomplete {
             let before_at = &input[..last_at];
             let after_at = &input[last_at + 1..];
             
+            // Check if this is a folder path that should show contents
+            // If the path ends with '/' and we have an exact folder match, show contents
+            if after_at.ends_with('/') && !after_at.trim_end_matches('/').is_empty() {
+                let folder_contents = self.get_folder_contents(after_at);
+                
+                // If we have folder contents, show them as drilling suggestions
+                if !folder_contents.is_empty() {
+                    let drill_suggestions: Vec<String> = folder_contents
+                        .into_iter()
+                        .map(|item| format!("{}@{}{}", before_at, after_at, item))
+                        .collect();
+                        
+                    return Ok(drill_suggestions);
+                }
+            }
+            
+            // Regular filesystem autocomplete
             let suggestions = self.get_file_suggestions(after_at);
             
-            // Create suggestions that include the partial completion
             let full_suggestions: Vec<String> = suggestions
                 .into_iter()
-                .map(|suggestion| {
-                    // For partial completions, just suggest the next part
-                    format!("{}@{}", before_at, suggestion)
-                })
+                .map(|suggestion| format!("{}@{}", before_at, suggestion))
                 .collect();
                 
             return Ok(full_suggestions);
@@ -85,6 +100,45 @@ impl Autocomplete for CustomTextAutocomplete {
 }
 
 impl CustomTextAutocomplete {
+    fn get_folder_contents(&self, folder_path: &str) -> Vec<String> {
+        // Remove trailing slash for directory access
+        let clean_path = folder_path.trim_end_matches('/');
+        let full_path = Path::new(&self.working_dir).join(clean_path);
+        let mut entries = Vec::new();
+
+        if let Ok(dir_entries) = fs::read_dir(&full_path) {
+            for entry in dir_entries.flatten() {
+                if let Ok(metadata) = entry.metadata() {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    
+                    // Skip hidden files unless specifically requested
+                    if name.starts_with('.') && !folder_path.contains("/.") {
+                        continue;
+                    }
+
+                    if metadata.is_dir() {
+                        entries.push(format!("{}/", name));
+                    } else {
+                        entries.push(name);
+                    }
+                }
+            }
+        }
+
+        // Sort: directories first, then files, both alphabetically
+        entries.sort_by(|a, b| {
+            let a_is_dir = a.ends_with('/');
+            let b_is_dir = b.ends_with('/');
+            match (a_is_dir, b_is_dir) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => a.cmp(b),
+            }
+        });
+
+        entries
+    }
+
     fn get_file_suggestions(&self, partial_path: &str) -> Vec<String> {
         if partial_path.is_empty() {
             return self.list_directory(".");
@@ -255,6 +309,7 @@ impl LooEngine {
         println!("   • Use /plan <request> for structured planning");
         println!("   • Use @ for file path autocomplete (e.g., 'edit @src/main.rs')");
         println!("   • Use Tab for command autocomplete");
+        println!("   • Use Tab Tab (double-tab) on folders to drill down (e.g., @src/ + Tab Tab)");
         println!("   • Terminal shortcuts: Ctrl+A (home), Ctrl+E (end), Ctrl+U (clear line)");
         println!("   • Type your messages and press Enter to send\n");
 
@@ -353,6 +408,25 @@ impl LooEngine {
                             "plan" => {
                                 let request = command_line.strip_prefix("plan").unwrap_or("").trim();
                                 engine_commands::handle_plan_command(self, request).await
+                            },
+                            "list-models" => {
+                                let args = if parts.len() > 1 { parts[1..].join(" ") } else { String::new() };
+                                engine_commands::handle_list_models_command(self, &args).await
+                            },
+                            "model" => {
+                                let args = if parts.len() > 1 { parts[1..].join(" ") } else { String::new() };
+                                engine_commands::handle_model_command(self, &args).await
+                            },
+                            "stack-status" => engine_commands::handle_stack_status_command(self, "").await,
+                            "stack-execute" => engine_commands::handle_stack_execute_command(self, "").await,
+                            "stack-clear" => engine_commands::handle_stack_clear_command(self, "").await,
+                            "stack-auto" => {
+                                let args = if parts.len() > 1 { parts[1..].join(" ") } else { String::new() };
+                                engine_commands::handle_stack_auto_command(self, &args).await
+                            },
+                            "stack-push" => {
+                                let args = if parts.len() > 1 { parts[1..].join(" ") } else { String::new() };
+                                engine_commands::handle_stack_push_command(self, &args).await
                             },
                             _ => Err(format!("Unknown engine command: {}", parts[0]).into())
                         }
