@@ -91,33 +91,3 @@ impl AutocompleteEngine {
     }
 }
 
-#[derive(Debug, Clone)]
-pub enum SpecialCommand {
-    Model(String),
-    ListModels(Option<String>),
-    Unknown(String),
-}
-
-pub fn parse_special_command(command: &str) -> SpecialCommand {
-    let parts: Vec<&str> = command.split_whitespace().collect();
-    
-    match parts.get(0) {
-        Some(&"model") => {
-            if parts.len() > 1 {
-                SpecialCommand::Model(parts[1..].join(" "))
-            } else {
-                SpecialCommand::Unknown("model command requires a model name".to_string())
-            }
-        }
-        Some(&"list-models") => {
-            let wildcard = if parts.len() > 1 {
-                Some(parts[1..].join(" "))
-            } else {
-                None
-            };
-            SpecialCommand::ListModels(wildcard)
-        }
-        Some(cmd) => SpecialCommand::Unknown(format!("Unknown command: {}", cmd)),
-        None => SpecialCommand::Unknown("Empty command".to_string()),
-    }
-}

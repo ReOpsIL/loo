@@ -36,6 +36,13 @@ pub enum Commands {
         #[command(subcommand)]
         config_command: ConfigCommand,
     },
+    #[command(about = "Generate detailed action plan for coding tasks")]
+    Plan {
+        #[arg(help = "Description of the task to plan")]
+        request: String,
+    },
+    #[command(about = "Test plan parsing and display with sample JSON")]
+    ParsePlanTest,
 }
 
 #[derive(Subcommand)]

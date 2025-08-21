@@ -1,20 +1,26 @@
 mod autocomplete;
 mod cli;
+mod commands;
 mod config;
 mod engine;
 mod openrouter;
+mod plan_display;
 mod story;
 mod terminal;
 mod tools;
 
 use clap::Parser;
 use cli::{Cli, Commands, ConfigCommand};
+use commands::{PlanCommand, init_command_registry};
 use config::ConfigManager;
 use engine::LooEngine;
 use std::fs;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Initialize the command registry
+    init_command_registry();
+    
     let cli = Cli::parse();
 
     match cli.command {
@@ -54,6 +60,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ConfigCommand::Validate => {
                     ConfigManager::validate_config()?;
                 }
+            }
+        }
+        Commands::Plan { request } => {
+            let plan_cmd = PlanCommand::new();
+            
+            // Execute the plan command through the engine flow
+            match plan_cmd.execute(&request).await {
+                Ok(result) => {
+                    println!("{}", result);
+                }
+                Err(e) => eprintln!("Error: {}", e),
+            }
+        }
+        Commands::ParsePlanTest => {
+            let plan_cmd = PlanCommand::new();
+            
+            // Read the test JSON file and display the parsed plan
+            match fs::read_to_string("test_plan.json") {
+                Ok(json_content) => {
+                    match plan_cmd.display_plan(&json_content) {
+                        Ok(formatted_plan) => {
+                            println!("🎯 Testing Plan Parser and Display\n");
+                            println!("{}", formatted_plan);
+                        }
+                        Err(e) => eprintln!("Error parsing plan: {}", e),
+                    }
+                }
+                Err(e) => eprintln!("Error reading test_plan.json: {}", e),
             }
         }
     }

@@ -3,17 +3,18 @@ use crate::openrouter::{Message, OpenRouterClient};
 use crate::story::StoryLogger;
 use crate::terminal::{TerminalInput, InputEvent};
 use crate::tools::ToolExecutor;
+use crate::commands::{execute_command, engine_commands};
 use serde_json::json;
 use uuid::Uuid;
 
 pub struct LooEngine {
-    openrouter_client: OpenRouterClient,
-    tool_executor: ToolExecutor,
-    story_logger: StoryLogger,
-    config: Config,
-    working_dir: String,
-    session_id: String,
-    messages: Vec<Message>,
+    pub openrouter_client: OpenRouterClient,
+    pub tool_executor: ToolExecutor,
+    pub story_logger: StoryLogger,
+    pub config: Config,
+    pub working_dir: String,
+    pub session_id: String,
+    pub messages: Vec<Message>,
 }
 
 impl LooEngine {
@@ -101,23 +102,6 @@ impl LooEngine {
         loop {
             match terminal_input.read_user_input().await? {
                 InputEvent::UserInput(user_message) => {
-                    // Check if this is a slash command
-                    if user_message.trim().starts_with('/') {
-                        match self.handle_slash_command(&user_message).await {
-                            Ok(handled) => {
-                                if handled {
-                                    // Command was handled internally, continue to next input
-                                    continue;
-                                }
-                                // Command not recognized, fall through to normal processing
-                            }
-                            Err(e) => {
-                                println!("❌ Error executing command: {}", e);
-                                continue;
-                            }
-                        }
-                    }
-
                     // Add user message to conversation
                     let user_msg = Message {
                         role: "user".to_string(),
@@ -141,6 +125,57 @@ impl LooEngine {
                 }
                 InputEvent::Interrupt => {
                     println!("\n⚠️ Interrupted");
+                    continue;
+                }
+                InputEvent::CommandExecuted(result) => {
+                    // Display command result and continue
+                    println!("✅ Command result:\n{}\n", result);
+                    continue;
+                }
+                InputEvent::EngineCommand(command_line) => {
+                    // Handle engine-specific commands
+                    let parts: Vec<&str> = command_line.split_whitespace().collect();
+                    if parts.is_empty() {
+                        continue;
+                    }
+                    
+                    let command_name = parts[0];
+                    
+                    // Execute command through registry
+                    let result = if let Some(registry_result) = execute_command(&command_line) {
+                        // Check if this is an engine command marker
+                        match registry_result {
+                            Err(e) if e.to_string().starts_with("ENGINE_COMMAND:") => {
+                                let error_msg = e.to_string();
+                                let parts: Vec<&str> = error_msg.strip_prefix("ENGINE_COMMAND:").unwrap().split(':').collect();
+                                match parts[0] {
+                                    "clear" => engine_commands::handle_clear_command(self).await,
+                                    "model" => {
+                                        let model_name = if parts.len() > 1 { parts[1] } else { "" };
+                                        engine_commands::handle_model_command(self, model_name).await
+                                    },
+                                    "list-models" => {
+                                        let search_term = if parts.len() > 1 { parts[1] } else { "" };
+                                        engine_commands::handle_list_models_command(self, search_term).await
+                                    },
+                                    "plan" => {
+                                        let request = if parts.len() > 1 { parts[1] } else { "" };
+                                        engine_commands::handle_plan_command(self, request).await
+                                    },
+                                    _ => Err(format!("Unknown engine command: {}", parts[0]).into())
+                                }
+                            },
+                            other => other
+                        }
+                    } else {
+                        Err(format!("Unknown command: {}", command_name).into())
+                    };
+
+
+                    match result {
+                        Ok(output) => println!("✅ {}\n", output),
+                        Err(e) => println!("❌ Error: {}\n", e),
+                    }
                     continue;
                 }
             }
@@ -265,106 +300,4 @@ impl LooEngine {
         &self.working_dir
     }
 
-    async fn handle_slash_command(&mut self, command: &str) -> Result<bool, Box<dyn std::error::Error>> {
-        let parts: Vec<&str> = command.trim().split_whitespace().collect();
-        if parts.is_empty() {
-            return Ok(false);
-        }
-
-        let cmd = parts[0].trim_start_matches('/');
-        
-        match cmd {
-            "list-models" => {
-                let search_term = if parts.len() > 1 {
-                    parts[1..].join(" ")
-                } else {
-                    String::new()
-                };
-                
-                // Print a newline first to ensure output starts at the beginning of a new line
-                println!();
-                
-                match self.openrouter_client.list_models(&search_term).await {
-                    Ok(models) => {
-                        if models.is_empty() {
-                            if search_term.is_empty() {
-                                println!("📋 No models available");
-                            } else {
-                                println!("📋 No models found matching '{}'", search_term);
-                            }
-                        } else {
-                            if search_term.is_empty() {
-                                println!("📋 Available models ({}):", models.len());
-                            } else {
-                                println!("📋 Models matching '{}' ({}):", search_term, models.len());
-                            }
-                            
-                            let max_items = std::cmp::min(models.len(), 10);
-                            for model in models.iter().take(max_items) {
-                                println!("  • {}", model);
-                            }
-                            
-                            if models.len() > max_items {
-                                println!("  ... and {} more", models.len() - max_items);
-                            }
-                        }
-                        Ok(true)
-                    }
-                    Err(e) => {
-                        println!("❌ Failed to fetch models: {}", e);
-                        Ok(true) // Still handled, just with error
-                    }
-                }
-            }
-            "model" => {
-                if parts.len() < 2 {
-                    println!();
-                    println!("❌ Usage: /model <model_name>");
-                    println!("💡 Tip: Use /list-models to see available models");
-                    return Ok(true);
-                }
-                
-                let new_model = parts[1..].join(" ");
-                let old_model = self.config.openrouter.model.clone();
-                
-                // Update the model in config
-                self.config.openrouter.model = new_model.clone();
-                
-                // Update the OpenRouter client with new config
-                match crate::openrouter::OpenRouterClient::new(self.config.clone()).await {
-                    Ok(new_client) => {
-                        self.openrouter_client = new_client;
-                        println!();
-                        println!("✅ Model changed from '{}' to '{}'", old_model, new_model);
-                        Ok(true)
-                    }
-                    Err(e) => {
-                        // Revert the model change on error
-                        self.config.openrouter.model = old_model;
-                        println!();
-                        println!("❌ Failed to switch to model '{}': {}", new_model, e);
-                        println!("💡 Tip: Use /list-models to see available models");
-                        Ok(true) // Still handled, just with error
-                    }
-                }
-            }
-            "clear" => {
-                // Count current messages (excluding system message)
-                let message_count = self.messages.len().saturating_sub(1);
-                
-                // Keep only the system message (first message)
-                if !self.messages.is_empty() {
-                    let system_message = self.messages[0].clone();
-                    self.messages.clear();
-                    self.messages.push(system_message);
-                }
-                
-                println!();
-                println!("🧹 Conversation context cleared ({} messages removed)", message_count);
-                println!("💡 The system prompt has been preserved");
-                Ok(true)
-            }
-            _ => Ok(false) // Command not recognized
-        }
-    }
 }

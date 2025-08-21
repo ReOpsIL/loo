@@ -1,4 +1,5 @@
 use crate::autocomplete::{AutocompleteEngine, FileEntry};
+use crate::commands::{get_autocomplete_commands, get_command_descriptions, execute_command, command_needs_engine};
 use crossterm::{
     cursor,
     event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
@@ -23,14 +24,10 @@ enum AutocompleteState {
     FileSystem {
         suggestions: Vec<FileEntry>,
         selected_index: usize,
-        prefix: String,
-        start_pos: usize, // Position in text where @ starts
     },
     Command {
         suggestions: Vec<String>,
         selected_index: usize,
-        prefix: String,
-        start_pos: usize, // Position in text where / starts
     },
 }
 
@@ -39,6 +36,8 @@ pub enum InputEvent {
     ExitRequest(u8),
     ClearPrompt,
     Interrupt,
+    CommandExecuted(String), // Result of command execution
+    EngineCommand(String), // Command that needs engine context
 }
 
 struct TextBuffer {
@@ -288,7 +287,7 @@ impl TerminalInput {
                         } => {
                             // Check if autocomplete is active and complete the selection
                             let completion_info = match &buffer.autocomplete_state {
-                                AutocompleteState::FileSystem { suggestions, selected_index, .. } => {
+                                AutocompleteState::FileSystem { suggestions, selected_index } => {
                                     if !suggestions.is_empty() && *selected_index < suggestions.len() {
                                         let selected_file = &suggestions[*selected_index];
                                         // Fix double slash issue by not adding / if it already ends with /
@@ -306,7 +305,7 @@ impl TerminalInput {
                                         None
                                     }
                                 }
-                                AutocompleteState::Command { suggestions, selected_index, .. } => {
+                                AutocompleteState::Command { suggestions, selected_index } => {
                                     if !suggestions.is_empty() && *selected_index < suggestions.len() {
                                         Some((suggestions[*selected_index].clone(), false))
                                     } else {
@@ -329,6 +328,47 @@ impl TerminalInput {
                                     self.render_input(&mut stdout, &buffer)?;
                                 }
                                 continue;
+                            }
+
+                            // Check if this is a special command (starts with /)
+                            let input_text = buffer.content.trim();
+                            if input_text.starts_with('/') {
+                                execute!(stdout, Print("\n"))?;
+                                disable_raw_mode()?;
+                                
+                                // Remove the leading '/' and get command parts
+                                let command_line = &input_text[1..];
+                                let parts: Vec<&str> = command_line.split_whitespace().collect();
+                                if !parts.is_empty() {
+                                    let command_name = parts[0];
+                                    
+                                    // Check if this command needs engine context
+                                    if command_needs_engine(command_name) {
+                                        self.exit_count = 0;
+                                        self.esc_count = 0;
+                                        return Ok(InputEvent::EngineCommand(command_line.to_string()));
+                                    }
+                                }
+                                
+                                // Try to execute as regular registry command
+                                match execute_command(command_line) {
+                                    Some(Ok(result)) => {
+                                        self.exit_count = 0;
+                                        self.esc_count = 0;
+                                        return Ok(InputEvent::CommandExecuted(result));
+                                    }
+                                    Some(Err(e)) => {
+                                        self.exit_count = 0;
+                                        self.esc_count = 0;
+                                        return Ok(InputEvent::CommandExecuted(format!("Error: {}", e)));
+                                    }
+                                    None => {
+                                        // Command not found, treat as normal input
+                                        enable_raw_mode()?;
+                                        self.render_input(&mut stdout, &buffer)?;
+                                        continue;
+                                    }
+                                }
                             }
 
                             // Normal Enter handling - submit the input
@@ -443,13 +483,13 @@ impl TerminalInput {
                             ..
                         } => {
                             match &mut buffer.autocomplete_state {
-                                AutocompleteState::FileSystem { selected_index, suggestions, .. } => {
+                                AutocompleteState::FileSystem { selected_index, suggestions } => {
                                     if !suggestions.is_empty() && *selected_index > 0 {
                                         *selected_index -= 1;
                                         self.render_with_autocomplete(&mut stdout, &buffer)?;
                                     }
                                 }
-                                AutocompleteState::Command { selected_index, suggestions, .. } => {
+                                AutocompleteState::Command { selected_index, suggestions } => {
                                     if !suggestions.is_empty() && *selected_index > 0 {
                                         *selected_index -= 1;
                                         self.render_with_autocomplete(&mut stdout, &buffer)?;
@@ -467,13 +507,13 @@ impl TerminalInput {
                             ..
                         } => {
                             match &mut buffer.autocomplete_state {
-                                AutocompleteState::FileSystem { selected_index, suggestions, .. } => {
+                                AutocompleteState::FileSystem { selected_index, suggestions } => {
                                     if !suggestions.is_empty() && *selected_index < suggestions.len() - 1 {
                                         *selected_index += 1;
                                         self.render_with_autocomplete(&mut stdout, &buffer)?;
                                     }
                                 }
-                                AutocompleteState::Command { selected_index, suggestions, .. } => {
+                                AutocompleteState::Command { selected_index, suggestions } => {
                                     if !suggestions.is_empty() && *selected_index < suggestions.len() - 1 {
                                         *selected_index += 1;
                                         self.render_with_autocomplete(&mut stdout, &buffer)?;
@@ -593,7 +633,7 @@ impl TerminalInput {
                             ..
                         } => {
                             // Special handling for space - always hides autocomplete
-                            if c == ' ' && matches!(buffer.autocomplete_state, AutocompleteState::FileSystem { .. } | AutocompleteState::Command { .. }) {
+                            if c == ' ' && !matches!(buffer.autocomplete_state, AutocompleteState::None) {
                                 // Space - cancel autocomplete and insert space
                                 buffer.autocomplete_state = AutocompleteState::None;
                                 buffer.insert_char(c);
@@ -741,7 +781,7 @@ impl TerminalInput {
 
     fn update_autocomplete(&mut self, buffer: &mut TextBuffer) -> Result<(), Box<dyn std::error::Error>> {
         if buffer.should_show_autocomplete() {
-            if let Some((trigger_char, start_pos, prefix)) = buffer.get_autocomplete_prefix() {
+            if let Some((trigger_char, _start_pos, prefix)) = buffer.get_autocomplete_prefix() {
                 match trigger_char {
                     '@' => {
                         // File system autocomplete
@@ -749,20 +789,11 @@ impl TerminalInput {
                         buffer.autocomplete_state = AutocompleteState::FileSystem {
                             suggestions,
                             selected_index: 0,
-                            prefix: prefix.clone(),
-                            start_pos,
                         };
                     }
                     '/' => {
-                        // Command autocomplete
-                        let mut commands = vec![
-                            "clear".to_string(),
-                            "model".to_string(),
-                            "list-models".to_string(),
-                        ];
-                        
-                        // Filter commands based on prefix
-                        commands.retain(|cmd| cmd.starts_with(&prefix));
+                        // Command autocomplete using registry
+                        let commands = get_autocomplete_commands(&prefix);
                         
                         // If no commands match, don't show autocomplete
                         if commands.is_empty() {
@@ -771,8 +802,6 @@ impl TerminalInput {
                             buffer.autocomplete_state = AutocompleteState::Command {
                                 suggestions: commands,
                                 selected_index: 0,
-                                prefix: prefix.clone(),
-                                start_pos,
                             };
                         }
                     }
@@ -799,7 +828,7 @@ impl TerminalInput {
 
         // Then render autocomplete suggestions below
         match &buffer.autocomplete_state {
-            AutocompleteState::FileSystem { suggestions, selected_index, .. } => {
+            AutocompleteState::FileSystem { suggestions, selected_index } => {
                 if !suggestions.is_empty() {
                     let max_items = std::cmp::min(suggestions.len(), 10); // Show max 10 items
                     for (i, file_entry) in suggestions.iter().take(max_items).enumerate() {
@@ -829,12 +858,9 @@ impl TerminalInput {
                 }
             }
             
-            AutocompleteState::Command { suggestions, selected_index, .. } => {
+            AutocompleteState::Command { suggestions, selected_index } => {
                 if !suggestions.is_empty() {
-                    let command_descriptions = std::collections::HashMap::from([
-                        ("model".to_string(), "Change the current LLM model".to_string()),
-                        ("list-models".to_string(), "List all available LLM models".to_string()),
-                    ]);
+                    let command_descriptions = get_command_descriptions();
                     
                     let max_items = std::cmp::min(suggestions.len(), 8); // Show max 8 commands
                     for (i, command) in suggestions.iter().take(max_items).enumerate() {
