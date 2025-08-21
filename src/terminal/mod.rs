@@ -324,6 +324,8 @@ impl TerminalInput {
                                     self.update_autocomplete(&mut buffer)?;
                                     self.render_with_autocomplete(&mut stdout, &buffer)?;
                                 } else {
+                                    // Clear autocomplete menu and render normal input
+                                    execute!(stdout, Clear(ClearType::FromCursorDown))?;
                                     self.render_input(&mut stdout, &buffer)?;
                                 }
                                 continue;
@@ -379,28 +381,40 @@ impl TerminalInput {
                             code: KeyCode::Esc,
                             ..
                         } => {
-                            self.esc_count += 1;
-                            
-                            if self.esc_count >= 3 {
-                                buffer.clear();
-                                self.esc_count = 0;
-                                
-                                execute!(
-                                    stdout,
-                                    Print("\n"),
-                                    SetForegroundColor(Color::Cyan),
-                                    Print("🧹 Input cleared!\n"),
-                                    ResetColor
-                                )?;
-                                
+                            // Check if autocomplete is active and hide it immediately
+                            if !matches!(buffer.autocomplete_state, AutocompleteState::None) {
+                                buffer.autocomplete_state = AutocompleteState::None;
+                                // Clear the screen from cursor down to remove autocomplete display
+                                execute!(stdout, Clear(ClearType::FromCursorDown))?;
                                 self.render_input(&mut stdout, &buffer)?;
+                                // Reset ESC count since we handled the escape
+                                self.esc_count = 0;
                             } else {
-                                execute!(
-                                    stdout,
-                                    SetForegroundColor(Color::Yellow),
-                                    Print(format!(" [ESC: {}/3]", self.esc_count)),
-                                    ResetColor
-                                )?;
+                                // Normal ESC behavior when no autocomplete is active
+                                self.esc_count += 1;
+                                
+                                if self.esc_count >= 3 {
+                                    buffer.clear();
+                                    self.esc_count = 0;
+                                    
+                                    execute!(
+                                        stdout,
+                                        Print("\n"),
+                                        cursor::MoveToColumn(0),
+                                        SetForegroundColor(Color::Cyan),
+                                        Print("🧹 Input cleared!\n"),
+                                        ResetColor
+                                    )?;
+                                    
+                                    self.render_input(&mut stdout, &buffer)?;
+                                } else {
+                                    execute!(
+                                        stdout,
+                                        SetForegroundColor(Color::Yellow),
+                                        Print(format!(" [ESC: {}/3]", self.esc_count)),
+                                        ResetColor
+                                    )?;
+                                }
                             }
                         }
 
@@ -742,6 +756,7 @@ impl TerminalInput {
                     '/' => {
                         // Command autocomplete
                         let mut commands = vec![
+                            "clear".to_string(),
                             "model".to_string(),
                             "list-models".to_string(),
                         ];
@@ -749,12 +764,17 @@ impl TerminalInput {
                         // Filter commands based on prefix
                         commands.retain(|cmd| cmd.starts_with(&prefix));
                         
-                        buffer.autocomplete_state = AutocompleteState::Command {
-                            suggestions: commands,
-                            selected_index: 0,
-                            prefix: prefix.clone(),
-                            start_pos,
-                        };
+                        // If no commands match, don't show autocomplete
+                        if commands.is_empty() {
+                            buffer.autocomplete_state = AutocompleteState::None;
+                        } else {
+                            buffer.autocomplete_state = AutocompleteState::Command {
+                                suggestions: commands,
+                                selected_index: 0,
+                                prefix: prefix.clone(),
+                                start_pos,
+                            };
+                        }
                     }
                     _ => {
                         buffer.autocomplete_state = AutocompleteState::None;

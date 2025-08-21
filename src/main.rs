@@ -18,7 +18,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Start { project, dir } => {
+        Commands::Start { project: user_prompt, dir } => {
             let config = ConfigManager::load_config()?;
             
             // Determine working directory from CLI, config, or current directory
@@ -31,7 +31,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .to_string();
 
             let mut engine = LooEngine::new(working_dir, cli.model, cli.verbose).await?;
-            engine.start_session(&project).await?;
+            engine.start_session(&user_prompt).await?;
         }
         Commands::Resume { session_id } => {
             println!("❌ Resume functionality not yet implemented for session: {}", session_id);

@@ -271,6 +271,7 @@ impl OpenRouterClient {
         let endpoint = format!("{}/chat/completions", self.config.openrouter.base_url);
         
         if self.config.preferences.verbose {
+            println!();
             println!("🔗 Sending request to: {}", endpoint);
             println!("📊 Request: {} messages, {} tools", request.messages.len(), request.tools.len());
         }
@@ -286,7 +287,7 @@ impl OpenRouterClient {
         let response_text = raw_response.text().await?;
         if self.config.preferences.verbose {
             let max_len = min(80, response_text.len());
-            println!("🐛 Raw API response: {}", response_text.get(..max_len).unwrap());
+            println!("\x1b[38;5;245m🐛 Raw API response: {}\x1b[0m", response_text.get(..max_len).unwrap().trim());
         }
 
         // Try to parse as error response first

@@ -92,6 +92,7 @@ impl LooEngine {
         println!("💡 Tips:");
         println!("   • Press Ctrl+C three times to exit");
         println!("   • Press ESC three times to clear your input");
+        println!("   • Use /clear to clear conversation context");
         println!("   • Type your messages and press Enter to send\n");
 
         let mut terminal_input = TerminalInput::new(self.working_dir.clone());
@@ -280,6 +281,9 @@ impl LooEngine {
                     String::new()
                 };
                 
+                // Print a newline first to ensure output starts at the beginning of a new line
+                println!();
+                
                 match self.openrouter_client.list_models(&search_term).await {
                     Ok(models) => {
                         if models.is_empty() {
@@ -314,6 +318,7 @@ impl LooEngine {
             }
             "model" => {
                 if parts.len() < 2 {
+                    println!();
                     println!("❌ Usage: /model <model_name>");
                     println!("💡 Tip: Use /list-models to see available models");
                     return Ok(true);
@@ -329,17 +334,35 @@ impl LooEngine {
                 match crate::openrouter::OpenRouterClient::new(self.config.clone()).await {
                     Ok(new_client) => {
                         self.openrouter_client = new_client;
+                        println!();
                         println!("✅ Model changed from '{}' to '{}'", old_model, new_model);
                         Ok(true)
                     }
                     Err(e) => {
                         // Revert the model change on error
                         self.config.openrouter.model = old_model;
+                        println!();
                         println!("❌ Failed to switch to model '{}': {}", new_model, e);
                         println!("💡 Tip: Use /list-models to see available models");
                         Ok(true) // Still handled, just with error
                     }
                 }
+            }
+            "clear" => {
+                // Count current messages (excluding system message)
+                let message_count = self.messages.len().saturating_sub(1);
+                
+                // Keep only the system message (first message)
+                if !self.messages.is_empty() {
+                    let system_message = self.messages[0].clone();
+                    self.messages.clear();
+                    self.messages.push(system_message);
+                }
+                
+                println!();
+                println!("🧹 Conversation context cleared ({} messages removed)", message_count);
+                println!("💡 The system prompt has been preserved");
+                Ok(true)
             }
             _ => Ok(false) // Command not recognized
         }
