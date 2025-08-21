@@ -1,13 +1,166 @@
 use crate::config::{Config, ConfigManager};
 use crate::openrouter::{Message, OpenRouterClient};
 use crate::story::StoryLogger;
-use crate::terminal::{TerminalInput, InputEvent};
 use crate::tools::ToolExecutor;
 use crate::commands::{execute_command, engine_commands};
 use crate::execution_stack::{ExecutionStack, StackRequest, StackResponse};
 use crate::llm_schemas::{TaskDecompositionResponse, PlanActionDecompositionResponse, NestedPlanResponse, schema_examples, create_json_prompt};
 use serde_json::json;
 use uuid::Uuid;
+use inquire::{Text, Autocomplete};
+use std::fs;
+use std::path::Path;
+
+
+#[derive(Clone)]
+struct CustomTextAutocomplete {
+    working_dir: String,
+}
+
+impl CustomTextAutocomplete {
+    fn new(working_dir: String) -> Self {
+        Self { working_dir }
+    }
+}
+
+impl Autocomplete for CustomTextAutocomplete {
+    fn get_suggestions(&mut self, input: &str) -> Result<Vec<String>, inquire::CustomUserError> {
+        // Handle slash commands
+        if input.starts_with('/') {
+            let commands = vec![
+                "/clear".to_string(),
+                "/plan".to_string(),
+                "/model".to_string(),
+                "/list-models".to_string(),
+                "/stack-status".to_string(),
+                "/stack-execute".to_string(),
+                "/stack-clear".to_string(),
+                "/stack-auto".to_string(),
+                "/stack-push".to_string(),
+            ];
+            
+            let filtered: Vec<String> = commands
+                .into_iter()
+                .filter(|cmd| cmd.starts_with(input))
+                .collect();
+                
+            return Ok(filtered);
+        }
+        
+        // Handle filesystem autocomplete if '@' is present
+        if input.contains('@') {
+            let last_at = input.rfind('@').unwrap();
+            let before_at = &input[..last_at];
+            let after_at = &input[last_at + 1..];
+            
+            let suggestions = self.get_file_suggestions(after_at);
+            
+            // Create suggestions that include the partial completion
+            let full_suggestions: Vec<String> = suggestions
+                .into_iter()
+                .map(|suggestion| {
+                    // For partial completions, just suggest the next part
+                    format!("{}@{}", before_at, suggestion)
+                })
+                .collect();
+                
+            return Ok(full_suggestions);
+        }
+        
+        // No suggestions for regular text
+        Ok(vec![])
+    }
+
+    fn get_completion(
+        &mut self,
+        _input: &str,
+        highlighted_suggestion: Option<String>,
+    ) -> Result<inquire::autocompletion::Replacement, inquire::CustomUserError> {
+        // Return partial replacement to allow continued typing
+        Ok(match highlighted_suggestion {
+            Some(suggestion) => inquire::autocompletion::Replacement::Some(suggestion),
+            None => inquire::autocompletion::Replacement::None,
+        })
+    }
+}
+
+impl CustomTextAutocomplete {
+    fn get_file_suggestions(&self, partial_path: &str) -> Vec<String> {
+        if partial_path.is_empty() {
+            return self.list_directory(".");
+        }
+
+        let path = Path::new(partial_path);
+        let (dir_path, file_prefix) = if partial_path.ends_with('/') {
+            (partial_path.trim_end_matches('/').to_string(), String::new())
+        } else {
+            match path.parent() {
+                Some(parent) => {
+                    let parent_str = parent.to_string_lossy().to_string();
+                    let file_name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                    (parent_str, file_name)
+                }
+                None => (".".to_string(), partial_path.to_string()),
+            }
+        };
+
+        let dir_path_str = if dir_path.is_empty() { "." } else { &dir_path };
+        let entries = self.list_directory(dir_path_str);
+        
+        entries
+            .into_iter()
+            .filter(|entry| entry.starts_with(&file_prefix))
+            .collect()
+    }
+
+    fn list_directory(&self, relative_path: &str) -> Vec<String> {
+        let full_path = Path::new(&self.working_dir).join(relative_path);
+        let mut entries = Vec::new();
+
+        if let Ok(dir_entries) = fs::read_dir(&full_path) {
+            for entry in dir_entries.flatten() {
+                if let Ok(metadata) = entry.metadata() {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    
+                    // Skip hidden files unless specifically requested
+                    if name.starts_with('.') && !relative_path.contains("/.") {
+                        continue;
+                    }
+
+                    let entry_path = if relative_path == "." {
+                        if metadata.is_dir() {
+                            format!("{}/", name)
+                        } else {
+                            name
+                        }
+                    } else {
+                        let clean_relative_path = relative_path.trim_end_matches('/');
+                        if metadata.is_dir() {
+                            format!("{}/{}/", clean_relative_path, name)
+                        } else {
+                            format!("{}/{}", clean_relative_path, name)
+                        }
+                    };
+
+                    entries.push(entry_path);
+                }
+            }
+        }
+
+        // Sort: directories first, then files, both alphabetically
+        entries.sort_by(|a, b| {
+            let a_is_dir = a.ends_with('/');
+            let b_is_dir = b.ends_with('/');
+            match (a_is_dir, b_is_dir) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => a.cmp(b),
+            }
+        });
+
+        entries
+    }
+}
 
 pub struct LooEngine {
     pub openrouter_client: OpenRouterClient,
@@ -98,107 +251,72 @@ impl LooEngine {
         println!("\n🎯 Interactive chat mode activated!");
         println!("💡 Tips:");
         println!("   • Press Ctrl+C three times to exit");
-        println!("   • Press ESC three times to clear your input");
         println!("   • Use /clear to clear conversation context");
+        println!("   • Use /plan <request> for structured planning");
+        println!("   • Use @ for file path autocomplete (e.g., 'edit @src/main.rs')");
+        println!("   • Use Tab for command autocomplete");
+        println!("   • Terminal shortcuts: Ctrl+A (home), Ctrl+E (end), Ctrl+U (clear line)");
         println!("   • Type your messages and press Enter to send\n");
 
-        let mut terminal_input = TerminalInput::new(self.working_dir.clone());
-
-        // Interactive chat loop
+        // Interactive chat loop with enhanced exit handling
+        let mut exit_attempts = 0;
+        
         loop {
-            match terminal_input.read_user_input().await? {
-                InputEvent::UserInput(user_message) => {
-                    // Add user message to conversation
-                    let user_msg = Message {
-                        role: "user".to_string(),
-                        content: user_message.clone(),
-                        tool_calls: None,
-                        tool_call_id: None,
-                    };
-                    self.messages.push(user_msg);
-                    self.story_logger.log_user_prompt(&user_message);
+            let user_input = Text::new("💬 You:")
+                .with_help_message("Type your message (Ctrl+C 3x to exit, Tab for autocomplete)")
+                .with_autocomplete(CustomTextAutocomplete::new(self.working_dir.clone()))
+                .prompt();
 
-                    // Process the conversation turn
-                    self.process_conversation_turn().await?;
-                }
-                InputEvent::ExitRequest(_count) => {
-                    println!("\n👋 Goodbye! Saving session story...");
-                    break;
-                }
-                InputEvent::ClearPrompt => {
-                    // This is handled in the terminal input module
-                    continue;
-                }
-                InputEvent::Interrupt => {
-                    println!("\n⚠️ Interrupted");
-                    continue;
-                }
-                InputEvent::CommandExecuted(result) => {
-                    // Display command result and continue
-                    println!("✅ Command result:\n{}\n", result);
-                    continue;
-                }
-                InputEvent::EngineCommand(command_line) => {
-                    // Handle engine-specific commands
-                    let parts: Vec<&str> = command_line.split_whitespace().collect();
-                    if parts.is_empty() {
+            match user_input {
+                Ok(user_message) => {
+                    exit_attempts = 0; // Reset exit attempts on successful input
+                    let user_message = user_message.trim();
+                    
+                    if user_message.is_empty() {
                         continue;
                     }
                     
-                    let command_name = parts[0];
-                    
-                    // Execute command through registry
-                    let result = if let Some(registry_result) = execute_command(&command_line) {
-                        // Check if this is an engine command marker
-                        match registry_result {
-                            Err(e) if e.to_string().starts_with("ENGINE_COMMAND:") => {
-                                let error_msg = e.to_string();
-                                let parts: Vec<&str> = error_msg.strip_prefix("ENGINE_COMMAND:").unwrap().split(':').collect();
-                                match parts[0] {
-                                    "clear" => engine_commands::handle_clear_command(self).await,
-                                    "model" => {
-                                        let model_name = if parts.len() > 1 { parts[1] } else { "" };
-                                        engine_commands::handle_model_command(self, model_name).await
-                                    },
-                                    "list-models" => {
-                                        let search_term = if parts.len() > 1 { parts[1] } else { "" };
-                                        engine_commands::handle_list_models_command(self, search_term).await
-                                    },
-                                    "plan" => {
-                                        let request = if parts.len() > 1 { parts[1] } else { "" };
-                                        engine_commands::handle_plan_command(self, request).await
-                                    },
-                                    "stack-status" => {
-                                        engine_commands::handle_stack_status_command(self, "").await
-                                    },
-                                    "stack-execute" => {
-                                        engine_commands::handle_stack_execute_command(self, "").await
-                                    },
-                                    "stack-clear" => {
-                                        engine_commands::handle_stack_clear_command(self, "").await
-                                    },
-                                    "stack-auto" => {
-                                        let args = if parts.len() > 1 { parts[1] } else { "" };
-                                        engine_commands::handle_stack_auto_command(self, args).await
-                                    },
-                                    "stack-push" => {
-                                        let args = if parts.len() > 1 { parts[1] } else { "" };
-                                        engine_commands::handle_stack_push_command(self, args).await
-                                    },
-                                    _ => Err(format!("Unknown engine command: {}", parts[0]).into())
-                                }
-                            },
-                            other => other
-                        }
+                    // Handle special commands
+                    if user_message.starts_with('/') {
+                        self.handle_command(&user_message[1..]).await?;
                     } else {
-                        Err(format!("Unknown command: {}", command_name).into())
-                    };
+                        // Regular user message
+                        let user_msg = Message {
+                            role: "user".to_string(),
+                            content: user_message.to_string(),
+                            tool_calls: None,
+                            tool_call_id: None,
+                        };
+                        self.messages.push(user_msg);
+                        self.story_logger.log_user_prompt(user_message);
 
-
-                    match result {
-                        Ok(output) => println!("✅ {}\n", output),
-                        Err(e) => println!("❌ Error: {}\n", e),
+                        // Process the conversation turn
+                        self.process_conversation_turn().await?;
                     }
+                }
+                Err(inquire::InquireError::OperationCanceled) => {
+                    exit_attempts += 1;
+                    if exit_attempts >= 3 {
+                        println!("\n👋 Goodbye! Saving session story...");
+                        break;
+                    } else {
+                        println!("\n⚠️ Press Ctrl+C {} more time(s) to exit", 3 - exit_attempts);
+                        continue;
+                    }
+                }
+                Err(inquire::InquireError::OperationInterrupted) => {
+                    exit_attempts += 1;
+                    if exit_attempts >= 3 {
+                        println!("\n👋 Goodbye! Saving session story...");
+                        break;
+                    } else {
+                        println!("\n⚠️ Press Ctrl+C {} more time(s) to exit", 3 - exit_attempts);
+                        continue;
+                    }
+                }
+                Err(e) => {
+                    println!("❌ Input error: {}", e);
+                    exit_attempts = 0;
                     continue;
                 }
             }
@@ -211,6 +329,67 @@ impl LooEngine {
             println!("📝 Session story saved to story.md");
         }
 
+        Ok(())
+    }
+
+    async fn handle_command(&mut self, command_line: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let parts: Vec<&str> = command_line.split_whitespace().collect();
+        if parts.is_empty() {
+            return Ok(());
+        }
+        
+        let command_name = parts[0];
+        
+        // Check if this command needs engine context
+        if crate::commands::command_needs_engine(command_name) {
+            // Execute engine command
+            let result = if let Some(registry_result) = execute_command(command_line) {
+                match registry_result {
+                    Err(e) if e.to_string().starts_with("ENGINE_COMMAND:") => {
+                        let error_msg = e.to_string();
+                        let parts: Vec<&str> = error_msg.strip_prefix("ENGINE_COMMAND:").unwrap().split(':').collect();
+                        match parts[0] {
+                            "clear" => engine_commands::handle_clear_command(self).await,
+                            "plan" => {
+                                let request = command_line.strip_prefix("plan").unwrap_or("").trim();
+                                engine_commands::handle_plan_command(self, request).await
+                            },
+                            _ => Err(format!("Unknown engine command: {}", parts[0]).into())
+                        }
+                    },
+                    other => other
+                }
+            } else {
+                Err(format!("Unknown command: {}", command_name).into())
+            };
+            
+            match result {
+                Ok(output) => {
+                    if !output.trim().is_empty() {
+                        println!("{}", output);
+                    }
+                }
+                Err(e) => {
+                    println!("❌ Command error: {}", e);
+                }
+            }
+        } else {
+            // Execute non-engine command
+            match execute_command(command_line) {
+                Some(Ok(output)) => {
+                    if !output.trim().is_empty() {
+                        println!("{}", output);
+                    }
+                }
+                Some(Err(e)) => {
+                    println!("❌ Command error: {}", e);
+                }
+                None => {
+                    println!("❌ Unknown command: {}", command_name);
+                }
+            }
+        }
+        
         Ok(())
     }
 

@@ -1,4 +1,3 @@
-mod autocomplete;
 mod cli;
 mod commands;
 mod config;
@@ -8,7 +7,6 @@ mod llm_schemas;
 mod openrouter;
 mod plan_display;
 mod story;
-mod terminal;
 mod tools;
 
 use clap::Parser;
