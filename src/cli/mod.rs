@@ -6,43 +6,28 @@ use clap::{Parser, Subcommand};
 #[command(version = "0.1.0")]
 pub struct Cli {
     #[command(subcommand)]
-    pub command: Commands,
+    pub command: Option<Commands>,
+    
+    /// Working directory for the session
+    #[arg(long)]
+    pub dir: Option<String>,
     
     /// Override default model from config
-    #[arg(long, global = true)]
+    #[arg(long)]
     pub model: Option<String>,
     
     /// Enable verbose output
-    #[arg(long, short, global = true)]
+    #[arg(long, short)]
     pub verbose: bool,
 }
 
 #[derive(Subcommand)]
 pub enum Commands {
-    #[command(about = "Start a new coding project with LLM guidance")]
-    Start { 
-        #[arg(help = "Project description or goal")]
-        project: String,
-        #[arg(long, help = "Working directory for the project")]
-        dir: Option<String>,
-    },
-    #[command(about = "Resume an existing coding session")]
-    Resume {
-        #[arg(help = "Session ID to resume")]
-        session_id: String,
-    },
     #[command(about = "Manage LOO CLI configuration")]
     Config {
         #[command(subcommand)]
         config_command: ConfigCommand,
     },
-    #[command(about = "Generate detailed action plan for coding tasks")]
-    Plan {
-        #[arg(help = "Description of the task to plan")]
-        request: String,
-    },
-    #[command(about = "Test plan parsing and display with sample JSON")]
-    ParsePlanTest,
 }
 
 #[derive(Subcommand)]

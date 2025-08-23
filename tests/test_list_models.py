@@ -38,7 +38,7 @@ def check_slash_command_logic():
     print("\n🔍 Checking slash command implementation...")
     
     # Check if handle_slash_command method exists in engine.rs
-    with open("/Users/dovcaspi/LOO/src/engine.rs", "r") as f:
+    with open("/engine.rs", "r") as f:
         engine_content = f.read()
         
     if "handle_slash_command" in engine_content:
@@ -48,7 +48,7 @@ def check_slash_command_logic():
         return False
     
     # Check if list_models method exists in openrouter/mod.rs  
-    with open("/Users/dovcaspi/LOO/src/openrouter/mod.rs", "r") as f:
+    with open("/openrouter/mod.rs", "r") as f:
         openrouter_content = f.read()
         
     if "list_models" in openrouter_content:

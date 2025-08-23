@@ -84,6 +84,7 @@ pub struct Model {
     pub description: Option<String>,
 }
 
+#[derive(Clone)]
 pub struct OpenRouterClient {
     client: reqwest::Client,
     config: Config,
